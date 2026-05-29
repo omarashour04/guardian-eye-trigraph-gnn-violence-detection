@@ -1,0 +1,35 @@
+[
+  {
+    "experiment": "E_full_qgf",
+    "n_params": 798618,
+    "latency_mean_ms": 90.441,
+    "latency_std_ms": 4.156,
+    "latency_p50_ms": 90.073,
+    "latency_p95_ms": 93.283,
+    "latency_p99_ms": 95.479,
+    "throughput_clips_per_sec": 491.52,
+    "device": "cuda"
+  },
+  {
+    "experiment": "E_full_lw",
+    "n_params": 798322,
+    "latency_mean_ms": 90.59,
+    "latency_std_ms": 2.433,
+    "latency_p50_ms": 90.123,
+    "latency_p95_ms": 94.905,
+    "latency_p99_ms": 100.106,
+    "throughput_clips_per_sec": 503.84,
+    "device": "cuda"
+  },
+  {
+    "experiment": "E_full_qgf_fixed",
+    "n_params": 798618,
+    "latency_mean_ms": 90.479,
+    "latency_std_ms": 1.634,
+    "latency_p50_ms": 90.35,
+    "latency_p95_ms": 93.366,
+    "latency_p99_ms": 94.605,
+    "throughput_clips_per_sec": 508.17,
+    "device": "cuda"
+  }
+]

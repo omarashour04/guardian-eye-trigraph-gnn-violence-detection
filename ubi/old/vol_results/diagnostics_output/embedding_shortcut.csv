@@ -1,0 +1,13 @@
+probe,split,auc
+emb->q_skel_high,train,0.986
+emb->q_skel_high,val,0.8967
+emb->q_skel_high,test,0.8712
+emb->label,train,0.9841
+emb->label,val,0.916
+emb->label,test,0.6811
+qskel_mean_pos,train,0.9093
+qskel_mean_neg,train,0.6731
+qskel_mean_pos,val,0.8354
+qskel_mean_neg,val,0.6775
+qskel_mean_pos,test,0.9337
+qskel_mean_neg,test,0.7832

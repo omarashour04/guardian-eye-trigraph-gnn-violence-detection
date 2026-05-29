@@ -1,0 +1,21 @@
+{
+  "experiment": "E_full_qgf",
+  "optimal_temperature": 0.9097973581544685,
+  "val_nll_before": 0.25800960218369934,
+  "val_nll_after": 0.25630334955624684,
+  "cal_threshold": 0.35000000000000003,
+  "pre_calibration": {
+    "macro_f1": 0.9174871073605251,
+    "roc_auc": 0.9616750000000001,
+    "accuracy": 0.9175,
+    "ece": 0.041437745171035816,
+    "threshold": 0.36000000000000004
+  },
+  "post_calibration": {
+    "macro_f1": 0.9174871073605251,
+    "roc_auc": 0.9616750000000001,
+    "accuracy": 0.9175,
+    "ece": 0.04789379791559699,
+    "threshold": 0.35000000000000003
+  }
+}

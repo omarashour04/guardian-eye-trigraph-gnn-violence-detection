@@ -1,0 +1,4 @@
+experiment,n_params,latency_mean_ms,latency_std_ms,latency_p50_ms,latency_p95_ms,latency_p99_ms,throughput_clips_per_sec,device
+E_full_qgf,798618,90.441,4.156,90.073,93.283,95.479,491.52,cuda
+E_full_lw,798322,90.59,2.433,90.123,94.905,100.106,503.84,cuda
+E_full_qgf_fixed,798618,90.479,1.634,90.35,93.366,94.605,508.17,cuda
