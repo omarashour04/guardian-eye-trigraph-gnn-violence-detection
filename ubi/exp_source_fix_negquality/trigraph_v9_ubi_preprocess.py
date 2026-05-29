@@ -2,7 +2,7 @@
 trigraph_v9_ubi_preprocess.py
 Guardian Eye — V9  |  Phase 1: Preprocessing
 Dataset : UBI-Fights  (intissarziani/ubi-fightsall)
-GPU     : L4  |  ETA ~4 hours for ~1,000 source videos
+GPU     : L4  |  ETA ~45 min for ~1,000 source videos (parallel shards)
 
 What this script does
 ─────────────────────
@@ -11,13 +11,23 @@ What this script does
 3. Approach B clip extraction:
    - Positive clips: 32-frame windows centred on annotated fight intervals.
    - Negative clips: 32-frame windows sampled from explicitly non-fight intervals.
-4. For every clip:
+4. For every clip (in parallel across N_SHARDS containers):
    a. Runs YOLO11x-pose + ByteTrack (persist=True) to extract identity-stable tracks.
    b. Runs YOLO11x object detector on the same frames.
    c. Builds V9-compatible graph arrays (skeleton, interaction, object, PO edges, masks) + GQS.
    d. Captures T_vit=16 uniformly-sampled frames at 224×224 uint8 RGB for VideoMAE.
 5. Saves one NPZ per clip to CACHE_DIR.
-6. Saves split_ubi.csv and gqs_summary_ubi.csv to PROC_MOUNT.
+6. Quality-matched negative selection: keeps neg_per_video candidates per video
+   whose q_skel matches the fight distribution; deletes the rest.
+7. Saves split_ubi.csv and gqs_summary_ubi.csv to PROC_MOUNT.
+
+Parallelism
+───────────
+  preprocess()        — orchestrator: download + extract + build inventory + dispatch shards
+  _process_shard()    — worker: runs YOLO on one shard of clips, writes NPZs + partial GQS CSV
+  _finalise()         — aggregator: merges partial GQS CSVs, runs quality selection, writes split CSV
+
+  N_SHARDS = 8 by default → ~8× faster than single-container run at identical GPU cost.
 
 NPZ schema (V9 — identical to RWF-2000 V9 for model compatibility)
 ───────────────────────────────────────────────────────────────────
@@ -66,6 +76,10 @@ vol_proc = modal.Volume.from_name(VOL_NAME_PROC, create_if_missing=True)
 
 RAW_MOUNT  = Path("/data/raw")
 PROC_MOUNT = Path("/data/proc")
+
+# Number of parallel GPU containers for the YOLO processing loop.
+# 8 shards → ~8× wall-time reduction at the same total GPU cost.
+N_SHARDS = 8
 
 RAW_DIR   = RAW_MOUNT  / "videos"        # extracted Kaggle dataset root
 CACHE_DIR = PROC_MOUNT / "cache_v9"      # one NPZ per clip
@@ -303,291 +317,36 @@ def negative_clip_indices(frame_labels: List[int],
     return clips
 
 
-# ── Main preprocessing function ───────────────────────────────────────────────
+# ── Shard worker (GPU, runs YOLO on a slice of the clip inventory) ────────────
 @app.function(
     image=image,
-    gpu="L4",        # SOURCE FIX cost knob: L4 (cheaper/hr) — YOLO11x fits in 24GB
-    cpu=2,
-    memory=12288,
-    timeout=25200,   # 7 hours
+    gpu="L4",
+    cpu=4,
+    memory=16384,
+    timeout=10800,  # 3 hours per shard
     volumes={
         str(RAW_MOUNT):  vol_raw,
         str(PROC_MOUNT): vol_proc,
     },
-    secrets=[modal.Secret.from_name(SECRET_NAME)],
+    retries=1,
 )
-def preprocess(force_reextract: bool = True) -> None:
-    # SOURCE FIX: default force_reextract=True. The negative-clip WINDOWS differ
-    # from the original buggy run (oversampled candidate pool, new RNG sequence),
-    # so reusing old NPZs by filename would mix old/new frame windows. A clean
-    # re-extract guarantees every kept clip's frames match its inventory window.
+def _process_shard(shard_rows: list, shard_idx: int) -> list:
+    """Process one shard of clips. Returns list of gqs_row dicts."""
     import numpy as np
-    import pandas as pd
     import cv2
     import torch
     from tqdm import tqdm
 
-    seed_everything(cfg.seed)
-    rng    = random.Random(cfg.seed)
+    seed_everything(cfg.seed + shard_idx)
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {DEVICE}")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    for d in [RAW_DIR, CACHE_DIR]:
-        d.mkdir(parents=True, exist_ok=True)
-
-    # ── Clean slate (SOURCE FIX) ──────────────────────────────────────────────
-    # When re-extracting, purge ALL old clip NPZs so no stale window from the
-    # buggy run survives under a colliding clip_id. Only touches CACHE_DIR NPZs;
-    # raw videos and the Kaggle zip are untouched.
-    if force_reextract or cfg.force_reextract:
-        old_npz = list(CACHE_DIR.glob("*.npz"))
-        for p in old_npz:
-            try:
-                p.unlink()
-            except Exception as e:
-                print(f"  WARN: could not remove old NPZ {p.name}: {e}")
-        if old_npz:
-            print(f"Clean slate: removed {len(old_npz)} old NPZ files from "
-                  f"{CACHE_DIR} before re-extraction.")
-            vol_proc.commit()
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 1 — Kaggle download & extraction
-    # ═════════════════════════════════════════════════════════════════════════
-    import json as _json
-    _token    = os.environ.get("KAGGLE_TOKEN",    "").strip()
-    _key      = os.environ.get("KAGGLE_KEY",      "").strip()
-    _username = os.environ.get("KAGGLE_USERNAME", "").strip()
-
-    if _token.startswith("{"):
-        kaggle_json = _token
-    elif _username and (_key or _token):
-        kaggle_json = _json.dumps({"username": _username, "key": _key or _token})
-    else:
-        kaggle_json = ""
-
-    zips = list(RAW_MOUNT.glob("*.zip"))
-
-    if not zips:
-        if not kaggle_json:
-            raise RuntimeError(
-                "No zip found in ubi-fights-raw and no usable Kaggle credentials.\n"
-                "Options:\n"
-                "  (a) Set KAGGLE_TOKEN secret to full kaggle.json contents\n"
-                "  (b) Set KAGGLE_TOKEN=<api_key> and KAGGLE_USERNAME=<user>\n"
-                "  (c) Upload zip manually:\n"
-                "      modal volume put ubi-fights-raw ubi-fightsall.zip /ubi-fightsall.zip"
-            )
-        kdir = Path("/root/.kaggle")
-        kdir.mkdir(exist_ok=True)
-        (kdir / "kaggle.json").write_text(kaggle_json)
-        os.chmod(str(kdir / "kaggle.json"), 0o600)
-
-        print("Downloading UBI-Fights from Kaggle …")
-        subprocess.run(
-            ["kaggle", "datasets", "download", "-d", cfg.kaggle_slug,
-             "-p", str(RAW_MOUNT), "--quiet"],
-            check=True,
-        )
-        vol_raw.commit()
-        zips = list(RAW_MOUNT.glob("*.zip"))
-
-    zip_path = zips[0]
-    print(f"Zip: {zip_path}")
-
-    marker = RAW_MOUNT / ".extracted"
-    if not marker.exists():
-        print("Extracting …")
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(str(RAW_MOUNT))
-        marker.touch()
-        vol_raw.commit()
-        print("Extraction done.")
-
-    # Locate dataset root — handle both flat and nested zip layouts
-    candidates = [
-        RAW_MOUNT / "UBI_FIGHTS",
-        RAW_MOUNT / "UBI-FIGHTS",
-        RAW_MOUNT / "ubi_fights",
-        RAW_MOUNT,
-    ]
-    dataset_root = next(
-        (p for p in candidates
-         if (p / "annotation").exists() or (p / "videos").exists()),
-        RAW_MOUNT,
-    )
-    print(f"Dataset root: {dataset_root}")
-
-    ann_dir    = dataset_root / "annotation"
-    video_root = dataset_root / "videos"
-    test_csv   = dataset_root / "test_videos.csv"
-
-    if not ann_dir.exists():
-        raise RuntimeError(f"annotation/ dir not found under {dataset_root}")
-    if not video_root.exists():
-        raise RuntimeError(f"videos/ dir not found under {dataset_root}")
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 2 — Load test split list
-    # ═════════════════════════════════════════════════════════════════════════
-    test_stems: set = set()
-    if test_csv.exists():
-        import pandas as pd
-        tc = pd.read_csv(str(test_csv), header=None)
-        # Column 0 expected to be video filename or stem
-        for val in tc.iloc[:, 0]:
-            test_stems.add(Path(str(val)).stem)
-        print(f"Test split: {len(test_stems)} videos from test_videos.csv")
-    else:
-        print("WARNING: test_videos.csv not found — all clips assigned to train")
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 3 — Build clip inventory (Approach B)
-    # ═════════════════════════════════════════════════════════════════════════
-    VIDEO_EXTS = {".avi", ".mp4", ".mov", ".mkv"}
-
-    # Map annotation stem → annotation file
-    ann_map: Dict[str, Path] = {}
-    for af in sorted(ann_dir.rglob("*")):
-        if af.is_file() and af.suffix in (".txt", ".csv", ""):
-            ann_map[af.stem] = af
-
-    # Map video stem → video file (search fight/ and non-fight/ subdirs + root)
-    vid_map: Dict[str, Path] = {}
-    for vf in sorted(video_root.rglob("*")):
-        if vf.is_file() and vf.suffix.lower() in VIDEO_EXTS:
-            vid_map[vf.stem] = vf
-
-    print(f"Annotation files: {len(ann_map)}  |  Video files: {len(vid_map)}")
-
-    # Reserve 20% of non-test video stems as a validation split.
-    # Seeded shuffle ensures the same val/train boundary on every run.
-    # Must come after ann_map is built (uses its keys).
-    train_candidate_stems = [s for s in sorted(ann_map.keys())
-                              if s not in test_stems]
-    rng_val = random.Random(cfg.seed)
-    rng_val.shuffle(train_candidate_stems)
-    n_val = max(1, int(len(train_candidate_stems) * 0.20))
-    val_stems: set = set(train_candidate_stems[:n_val])
-    print(f"Val split: {len(val_stems)} videos (20% of non-test)")
-
-    rows: List[Dict] = []
-
-    for stem, ann_path in tqdm(sorted(ann_map.items()),
-                                desc="Building clip inventory", unit="video"):
-        vid_path = vid_map.get(stem)
-        if vid_path is None:
-            print(f"  WARN: no video for annotation {stem}, skipping.")
-            continue
-
-        if stem in test_stems:
-            split = "test"
-        elif stem in val_stems:
-            split = "val"
-        else:
-            split = "train"
-
-        frame_labels = parse_annotation(ann_path)
-        n_ann        = len(frame_labels)
-        if n_ann == 0:
-            continue
-
-        has_fight = any(l == 1 for l in frame_labels)
-
-        if has_fight:
-            # Positive clips — tile non-overlapping T-frame windows across each
-            # annotated fight interval.  Intervals < T//2 frames are dropped.
-            for (fs, fe) in fight_intervals(frame_labels):
-                windows = clips_for_interval(fs, fe, n_ann, cfg.T)
-                for wi, _ in enumerate(windows):
-                    # clip_id encodes the original interval + window index so
-                    # NPZ filenames remain stable across re-runs.
-                    clip_id = f"{stem}_fight_{fs}_{fe}_w{wi}"
-                    rows.append({
-                        "clip_id":      clip_id,
-                        "video_path":   str(vid_path),
-                        "ann_path":     str(ann_path),
-                        "label":        1,
-                        "split":        split,
-                        "frame_start":  fs,
-                        "frame_end":    fe,
-                        "clip_type":    "positive",
-                        "n_ann_frames": n_ann,
-                        "window_idx":   wi,
-                        "src_stem":     stem,
-                        "is_neg_cand":  False,
-                    })
-
-        # Negative clips — sampled from non-fight intervals.
-        # SOURCE FIX: propose an OVERSAMPLED candidate pool; the post-loop
-        # quality-matched selection keeps only neg_per_video per video. All
-        # candidates are processed (YOLO) so we know each one's q_skel before
-        # selecting; dropped candidates' NPZs are deleted afterwards.
-        import math as _math
-        n_cand = max(cfg.neg_per_video,
-                     int(_math.ceil(cfg.neg_per_video * cfg.neg_oversample)))
-        neg_clips = negative_clip_indices(
-            frame_labels, n_ann, cfg.T, cfg.neg_per_video, rng,
-            n_candidates=n_cand)
-        for ni, idxs in enumerate(neg_clips):
-            # clip_id carries the candidate index so every candidate NPZ has a
-            # unique stable filename. Selection later prunes a subset of these.
-            clip_id = f"{stem}_nonfight_{ni}"
-            rows.append({
-                "clip_id":      clip_id,
-                "video_path":   str(vid_path),
-                "ann_path":     str(ann_path),
-                "label":        0,
-                "split":        split,
-                "frame_start":  int(idxs[0]),
-                "frame_end":    int(idxs[-1]) + 1,
-                "clip_type":    "negative",     # all candidates are real negatives
-                "n_ann_frames": n_ann,
-                "src_stem":     stem,           # group key for per-video selection
-                "is_neg_cand":  True,           # marks rows subject to pruning
-            })
-
-    all_df = pd.DataFrame(rows)
-    # Fill window_idx=0 for negative clips (they have no window tiling)
-    if "window_idx" not in all_df.columns:
-        all_df["window_idx"] = 0
-    else:
-        all_df["window_idx"] = all_df["window_idx"].fillna(0).astype(int)
-    # Ensure the source-fix grouping columns exist for every row.
-    if "src_stem" not in all_df.columns:
-        all_df["src_stem"] = ""
-    if "is_neg_cand" not in all_df.columns:
-        all_df["is_neg_cand"] = False
-    all_df["is_neg_cand"] = all_df["is_neg_cand"].fillna(False).astype(bool)
-
-    n_neg_cand = int(all_df["is_neg_cand"].sum())
-    print(f"\nClip inventory (with oversampled negative candidates):")
-    print(f"  Total clips           : {len(all_df)}")
-    print(f"  Negative CANDIDATES   : {n_neg_cand} "
-          f"(oversample={cfg.neg_oversample}, keep {cfg.neg_per_video}/video)")
-    print(all_df.groupby(["split", "label"]).size().to_string())
-
-    # SOURCE FIX: this pre-loop CSV is PROVISIONAL — it lists every candidate
-    # (more negatives than we will keep). The authoritative split_ubi.csv is
-    # rewritten AFTER quality-matched selection (Step 6b) so it lists only kept
-    # clips. We do NOT overwrite split_ubi.csv here, to avoid leaving a stale
-    # candidate-inflated split file if the run is interrupted mid-loop.
-    candidate_csv = PROC_MOUNT / "neg_candidates_ubi.csv"
-    all_df.to_csv(str(candidate_csv), index=False)
-    vol_proc.commit()
-
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 4 — Load YOLO models
-    # ═════════════════════════════════════════════════════════════════════════
-    print("\nLoading detectors …")
+    print(f"[shard {shard_idx}] Loading detectors on {DEVICE} ...")
     pose_model = load_yolo(cfg.pose_weights, cfg.pose_fallback, "pose")
     obj_model  = load_yolo(cfg.obj_weights,  cfg.obj_fallback,  "object")
     pose_model.to(DEVICE)
     obj_model.to(DEVICE)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 5 — Per-clip processing loop
-    # ═════════════════════════════════════════════════════════════════════════
     T  = cfg.T
     M  = cfg.M
     N  = cfg.N
@@ -595,27 +354,25 @@ def preprocess(force_reextract: bool = True) -> None:
     Tv = cfg.T_vit
     SZ = cfg.vit_size
 
-    gqs_rows: List[Dict] = []
-    skipped       = 0
+    gqs_rows: list = []
+    skipped = 0
     processed_count = 0
-    COMMIT_EVERY  = 100
+    COMMIT_EVERY = 100
 
-    for _, row in tqdm(all_df.iterrows(), total=len(all_df),
-                       desc="Preprocessing clips", unit="clip"):
-
-        clip_id  = str(row["clip_id"])
-        label    = int(row["label"])
-        split    = str(row["split"])
-        vid_path = str(row["video_path"])
-        f_start  = int(row["frame_start"])
-        f_end    = int(row["frame_end"])
-        # Source-fix grouping metadata (carried into gqs_rows for selection).
+    for row in tqdm(shard_rows, desc=f"Shard {shard_idx}", unit="clip"):
+        clip_id     = str(row["clip_id"])
+        label       = int(row["label"])
+        split       = str(row["split"])
+        vid_path    = str(row["video_path"])
+        f_start     = int(row["frame_start"])
+        f_end       = int(row["frame_end"])
+        clip_type   = str(row.get("clip_type", "negative"))
         src_stem    = str(row.get("src_stem", ""))
         is_neg_cand = bool(row.get("is_neg_cand", False))
-        npz_path = CACHE_DIR / f"{clip_id}.npz"
+        npz_path    = CACHE_DIR / f"{clip_id}.npz"
 
-        # ── Skip already-done clips ───────────────────────────────────────
-        if npz_path.exists() and not (force_reextract or cfg.force_reextract):
+        # Resume: skip clips already written
+        if npz_path.exists():
             try:
                 with np.load(str(npz_path), allow_pickle=False) as d:
                     if "frames_vit" in d:
@@ -631,60 +388,44 @@ def preprocess(force_reextract: bool = True) -> None:
             except Exception:
                 pass
 
-        # ── Read relevant frames from source video ────────────────────────
         cap = cv2.VideoCapture(vid_path)
         if not cap.isOpened():
             print(f"  WARN: cannot open {vid_path}")
             skipped += 1
             continue
 
-        # Determine frame indices for this clip
         n_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if row["clip_type"] == "positive":
-            # Use the specific tiled window for this row (window_idx into
-            # clips_for_interval output). Recompute to avoid storing all
-            # frame indices in the CSV.
-            wi       = int(row.get("window_idx", 0))
-            windows  = clips_for_interval(f_start, f_end, n_total, T)
+        if clip_type == "positive":
+            wi      = int(row.get("window_idx", 0))
+            windows = clips_for_interval(f_start, f_end, n_total, T)
             if wi >= len(windows):
-                # Stale window_idx (shouldn't happen, but guard against it)
-                cap.release()
-                skipped += 1
-                continue
+                cap.release(); skipped += 1; continue
             graph_idx = windows[wi]
         else:
-            import numpy as np_local
-            graph_idx = np_local.linspace(f_start, max(f_start, f_end - 1),
-                                          T, dtype=int).tolist()
-
-        vit_idx = graph_idx  # same window; T_vit subset taken below
+            graph_idx = np.linspace(f_start, max(f_start, f_end - 1),
+                                    T, dtype=int).tolist()
 
         needed = set(graph_idx)
         raw_frames: Dict[int, np.ndarray] = {}
         fi_cursor = 0
-
         for target_fi in sorted(needed):
-            # Seek only when needed (forward seek is cheap, backward is not)
             if target_fi < fi_cursor:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, target_fi)
                 fi_cursor = target_fi
             else:
                 while fi_cursor < target_fi:
-                    cap.read()   # skip frames
+                    cap.read()
                     fi_cursor += 1
-
             ret, frame = cap.read()
             if ret:
                 raw_frames[target_fi] = frame
             fi_cursor += 1
-
         cap.release()
 
         if len(raw_frames) == 0:
             skipped += 1
             continue
 
-        # ── Allocate output arrays ────────────────────────────────────────
         skeleton      = np.zeros((T, M, V, 3),   dtype=np.float32)
         int_nodes     = np.zeros((T, M, 7),       dtype=np.float32)
         int_edges     = np.zeros((T, M, M, 4),    dtype=np.float32)
@@ -699,14 +440,11 @@ def preprocess(force_reextract: bool = True) -> None:
         prev_centers: Dict[int, np.ndarray] = {}
         track_ages:   Dict[int, int]        = {}
 
-        # Reset ByteTrack state between clips
         try:
             for tracker in pose_model.predictor.trackers:
                 tracker.reset()
         except Exception:
             pass
-
-        frame_buffer: Dict[int, Dict] = {}
 
         for ti, fi in enumerate(graph_idx):
             fi = int(fi)
@@ -727,7 +465,6 @@ def preprocess(force_reextract: bool = True) -> None:
             h, w  = frame_bgr.shape[:2]
             denom = float(max(h, w))
 
-            # ── Pose + ByteTrack ──────────────────────────────────────────
             persons = []
             try:
                 res_pose = pose_model.track(
@@ -748,38 +485,29 @@ def preprocess(force_reextract: bool = True) -> None:
                         bw  = (x2 - x1)       / denom
                         bh  = (y2 - y1)       / denom
                         conf = float(boxes_t.conf[pi].item())
-
                         speed = 0.0
                         if tid in prev_centers:
                             speed = float(np.linalg.norm(
                                 np.array([bx, by]) - prev_centers[tid]))
                         prev_centers[tid] = np.array([bx, by])
-
                         track_ages[tid]  = track_ages.get(tid, 0) + 1
-                        frames_elapsed   = ti + 1
-                        continuity       = min(track_ages[tid] / frames_elapsed, 1.0)
-
+                        continuity = min(track_ages[tid] / (ti + 1), 1.0)
                         kps_n = kps_data[pi].copy()
                         kps_n[:, 0] /= denom
                         kps_n[:, 1] /= denom
-
-                        persons.append({
-                            "id": tid, "conf": conf,
-                            "box": (bx, by, bw, bh),
-                            "speed": speed, "continuity": continuity,
-                            "kps": kps_n,
-                        })
+                        persons.append({"id": tid, "conf": conf,
+                                        "box": (bx, by, bw, bh),
+                                        "speed": speed, "continuity": continuity,
+                                        "kps": kps_n})
             except (RuntimeError, torch.cuda.OutOfMemoryError):
                 raise
             except Exception:
                 pass
 
-            # ── Object detection ──────────────────────────────────────────
             objects = []
             try:
                 res_obj = obj_model.predict(
-                    frame_bgr, conf=cfg.obj_conf,
-                    iou=cfg.obj_iou, verbose=False,
+                    frame_bgr, conf=cfg.obj_conf, iou=cfg.obj_iou, verbose=False,
                 )[0]
                 for oi in range(len(res_obj.boxes)):
                     x1, y1, x2, y2 = res_obj.boxes.xyxy[oi].cpu().numpy()
@@ -796,9 +524,6 @@ def preprocess(force_reextract: bool = True) -> None:
             except Exception:
                 pass
 
-            frame_buffer[fi] = {"persons": persons, "objects": objects}
-
-            # ── Fill structured arrays ────────────────────────────────────
             persons_s = sorted(persons, key=lambda p: p["conf"], reverse=True)[:M]
             objects_s = objects[:N]
 
@@ -817,14 +542,14 @@ def preprocess(force_reextract: bool = True) -> None:
                         continue
                     bxj, byj, bwj, bhj = persons_s[pj]["box"]
                     dist  = float(np.hypot(bxi - bxj, byi - byj))
-                    xi1, yi1 = bxi - bwi / 2, byi - bhi / 2
-                    xi2, yi2 = bxi + bwi / 2, byi + bhi / 2
-                    xj1, yj1 = bxj - bwj / 2, byj - bhj / 2
-                    xj2, yj2 = bxj + bwj / 2, byj + bhj / 2
+                    xi1, yi1 = bxi - bwi/2, byi - bhi/2
+                    xi2, yi2 = bxi + bwi/2, byi + bhi/2
+                    xj1, yj1 = bxj - bwj/2, byj - bhj/2
+                    xj2, yj2 = bxj + bwj/2, byj + bhj/2
                     ix    = max(0.0, min(xi2, xj2) - max(xi1, xj1))
                     iy    = max(0.0, min(yi2, yj2) - max(yi1, yj1))
                     inter = ix * iy
-                    union = bwi * bhi + bwj * bhj - inter + 1e-6
+                    union = bwi*bhi + bwj*bhj - inter + 1e-6
                     iou   = inter / union
                     close = 1.0 if dist < 0.15 else 0.0
                     rel_spd = abs(persons_s[pi]["speed"] - persons_s[pj]["speed"])
@@ -832,31 +557,28 @@ def preprocess(force_reextract: bool = True) -> None:
                     int_edge_mask[ti, pi, pj] = True
 
             for oi, obj in enumerate(objects_s):
-                obj_nodes[ti, oi] = [obj["cx"], obj["cy"],
-                                     obj["w"],  obj["h"],
+                obj_nodes[ti, oi] = [obj["cx"], obj["cy"], obj["w"], obj["h"],
                                      obj["conf"], obj["cls"]]
                 obj_node_mask[ti, oi] = True
 
             for pi, p in enumerate(persons_s):
                 kps    = p["kps"]
                 bx, by, bw, bh = p["box"]
-                wrist_pts = [kps[wi, :2]
-                              for wi in (9, 10)
-                              if kps[wi, 2] > 0.25]
+                wrist_pts = [kps[wi, :2] for wi in (9, 10) if kps[wi, 2] > 0.25]
                 for oi, obj in enumerate(objects_s):
                     ox, oy, ow, oh = obj["cx"], obj["cy"], obj["w"], obj["h"]
                     body_d  = float(np.hypot(bx - ox, by - oy))
-                    wrist_d = (float(min(np.hypot(wp[0] - ox, wp[1] - oy)
+                    wrist_d = (float(min(np.hypot(wp[0]-ox, wp[1]-oy)
                                         for wp in wrist_pts))
                                if wrist_pts else 2.0)
-                    xi1, yi1 = bx - bw / 2, by - bh / 2
-                    xi2, yi2 = bx + bw / 2, by + bh / 2
-                    xj1, yj1 = ox - ow / 2, oy - oh / 2
-                    xj2, yj2 = ox + ow / 2, oy + oh / 2
+                    xi1, yi1 = bx - bw/2, by - bh/2
+                    xi2, yi2 = bx + bw/2, by + bh/2
+                    xj1, yj1 = ox - ow/2, oy - oh/2
+                    xj2, yj2 = ox + ow/2, oy + oh/2
                     ix    = max(0.0, min(xi2, xj2) - max(xi1, xj1))
                     iy    = max(0.0, min(yi2, yj2) - max(yi1, yj1))
                     inter = ix * iy
-                    union = bw * bh + ow * oh - inter + 1e-6
+                    union = bw*bh + ow*oh - inter + 1e-6
                     po_iou     = inter / union
                     near_wrist = 1.0 if wrist_d < 0.10 else 0.0
                     near_body  = 1.0 if body_d  < 0.20 else 0.0
@@ -864,56 +586,40 @@ def preprocess(force_reextract: bool = True) -> None:
                                                 po_iou, near_wrist, near_body]
                     po_edge_mask[ti, pi, oi] = True
 
-        # ── VideoMAE frames ───────────────────────────────────────────────
-        import numpy as np_vit
-        vit_sample = np_vit.linspace(0, T - 1, Tv, dtype=int).tolist()
+        vit_sample = np.linspace(0, T - 1, Tv, dtype=int).tolist()
         for vi, ti in enumerate(vit_sample):
-            fi = int(graph_idx[ti])
+            fi  = int(graph_idx[ti])
             bgr = raw_frames.get(fi)
             if bgr is not None:
-                rgb = cv2.cvtColor(
+                frames_vit[vi] = cv2.cvtColor(
                     cv2.resize(bgr, (SZ, SZ), interpolation=cv2.INTER_LINEAR),
-                    cv2.COLOR_BGR2RGB,
-                )
-                frames_vit[vi] = rgb
+                    cv2.COLOR_BGR2RGB)
             elif vi > 0:
                 frames_vit[vi] = frames_vit[vi - 1]
 
-        # ── GQS ──────────────────────────────────────────────────────────
-        # Count frames where at least one person has ≥ min_joints confident keypoints
         valid_skel = sum(
-            1
-            for ti in range(T)
-            if any(
-                int_node_mask[ti, pi]
-                and int((skeleton[ti, pi, :, 2] > 0.25).sum()) >= cfg.min_joints
-                for pi in range(M)
-            )
+            1 for ti in range(T)
+            if any(int_node_mask[ti, pi]
+                   and int((skeleton[ti, pi, :, 2] > 0.25).sum()) >= cfg.min_joints
+                   for pi in range(M))
         )
         q_skel      = valid_skel / T
         q_int       = sum(int(int_node_mask[ti].sum() >= 2) for ti in range(T)) / T
         q_obj       = sum(int(obj_node_mask[ti].sum() >= 1) for ti in range(T)) / T
         q_po        = sum(int(po_edge_mask[ti].any())       for ti in range(T)) / T
         valid_ratio = sum(int(int_node_mask[ti].any())      for ti in range(T)) / T
-
         gqs = np.array([q_skel, q_int, q_obj, q_po, valid_ratio], dtype=np.float32)
 
-        # ── Save NPZ ──────────────────────────────────────────────────────
         np.savez_compressed(
             str(npz_path),
-            skeleton      = skeleton,
-            int_nodes     = int_nodes,
-            int_edges     = int_edges,
-            int_node_mask = int_node_mask,
-            int_edge_mask = int_edge_mask,
-            obj_nodes     = obj_nodes,
-            obj_node_mask = obj_node_mask,
-            po_edges      = po_edges,
-            po_edge_mask  = po_edge_mask,
-            gqs           = gqs,
-            frames_vit    = frames_vit,
-            label         = np.array(label,  dtype=np.int64),
-            split         = np.array(split),
+            skeleton=skeleton,       int_nodes=int_nodes,
+            int_edges=int_edges,     int_node_mask=int_node_mask,
+            int_edge_mask=int_edge_mask,
+            obj_nodes=obj_nodes,     obj_node_mask=obj_node_mask,
+            po_edges=po_edges,       po_edge_mask=po_edge_mask,
+            gqs=gqs,                 frames_vit=frames_vit,
+            label=np.array(label, dtype=np.int64),
+            split=np.array(split),
         )
 
         gqs_rows.append({
@@ -927,130 +633,313 @@ def preprocess(force_reextract: bool = True) -> None:
         processed_count += 1
         if processed_count % COMMIT_EVERY == 0:
             vol_proc.commit()
-            print(f"  [commit] {processed_count} clips processed — volume flushed.")
+            print(f"  [shard {shard_idx}] {processed_count} done.")
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 6 — Quality-matched negative selection  (SOURCE FIX, CPU-only)
-    # ═════════════════════════════════════════════════════════════════════════
-    # Every clip (positives + ALL negative candidates) now has a measured q_skel
-    # in gqs_rows. We keep neg_per_video negatives per source video whose q_skel
-    # matches the FIGHT q_skel distribution, then drop the rest. This destroys the
-    # train-only "clean skeleton -> fight" correlation at the data source.
-    gqs_df = pd.DataFrame(gqs_rows)
+    vol_proc.commit()
+    print(f"[shard {shard_idx}] complete: {processed_count} processed, {skipped} skipped.")
+    return gqs_rows
+
+
+# ── Finalise (CPU-only: quality-select negatives, write CSVs) ─────────────────
+@app.function(
+    image=image,
+    cpu=4,
+    memory=8192,
+    timeout=1800,
+    volumes={
+        str(RAW_MOUNT):  vol_raw,
+        str(PROC_MOUNT): vol_proc,
+    },
+)
+def _finalise(all_gqs_rows: list) -> None:
+    import numpy as np
+    import pandas as pd
+
+    gqs_df = pd.DataFrame(all_gqs_rows)
     if "is_neg_cand" not in gqs_df.columns:
         gqs_df["is_neg_cand"] = False
     gqs_df["is_neg_cand"] = gqs_df["is_neg_cand"].fillna(False).astype(bool)
     if "src_stem" not in gqs_df.columns:
         gqs_df["src_stem"] = ""
 
-    # Global fight q_skel target (used by the "fight_quantile" strategy). Fights
-    # are the positive clips; we match negatives to this distribution so the two
-    # classes become quality-indistinguishable.
-    fight_q = gqs_df.loc[gqs_df["label"] == 1, "q_skel"].to_numpy()
+    fight_q     = gqs_df.loc[gqs_df["label"] == 1, "q_skel"].to_numpy()
     fight_q_med = float(np.median(fight_q)) if fight_q.size else 1.0
-    print(f"\nQuality-matched negative selection "
-          f"(strategy={cfg.quality_match}, fight q_skel median={fight_q_med:.3f})")
+    print(f"Quality-matched selection: strategy={cfg.quality_match}, "
+          f"fight q_skel median={fight_q_med:.3f}")
 
-    def _select_keep_ids(cand: "pd.DataFrame") -> List[str]:
-        """Return the clip_ids to KEEP from one video's negative candidates."""
+    def _select_keep_ids(cand):
         k = min(cfg.neg_per_video, len(cand))
         if k <= 0:
             return []
         if len(cand) <= cfg.neg_per_video:
-            return cand["clip_id"].tolist()           # nothing to prune
+            return cand["clip_id"].tolist()
         if cfg.quality_match == "high":
-            # Keep the highest-q_skel candidates.
-            ordered = cand.sort_values("q_skel", ascending=False)
-            return ordered["clip_id"].head(k).tolist()
-        # "fight_quantile": keep the k candidates whose q_skel is closest to the
-        # global fight q_skel target (so kept-negative quality tracks fight
-        # quality and the correlation with the label vanishes).
+            return cand.sort_values("q_skel", ascending=False)["clip_id"].head(k).tolist()
         cand = cand.assign(_d=(cand["q_skel"] - fight_q_med).abs())
-        ordered = cand.sort_values("_d", ascending=True)
-        return ordered["clip_id"].head(k).tolist()
+        return cand.sort_values("_d")["clip_id"].head(k).tolist()
 
     keep_neg_ids: set = set()
     cand_df = gqs_df[gqs_df["is_neg_cand"]]
     for stem, grp in cand_df.groupby("src_stem"):
         keep_neg_ids.update(_select_keep_ids(grp))
 
-    # Drop = candidate negatives NOT selected. Positives and any non-candidate
-    # rows are always kept.
     dropped_ids = [cid for cid in cand_df["clip_id"].tolist()
                    if cid not in keep_neg_ids]
-    print(f"  Negative candidates : {len(cand_df)}")
-    print(f"  Negatives KEPT      : {len(keep_neg_ids)}")
-    print(f"  Negatives DROPPED   : {len(dropped_ids)}")
+    print(f"  Candidates: {len(cand_df)}  |  Kept: {len(keep_neg_ids)}  "
+          f"|  Dropped: {len(dropped_ids)}")
 
-    # Delete dropped candidate NPZs so the volume holds only kept clips.
-    # GUARD: only ever delete files whose clip_id is a confirmed dropped
-    # candidate — never a positive, never a kept negative.
     keep_all_mask = (~gqs_df["is_neg_cand"]) | gqs_df["clip_id"].isin(keep_neg_ids)
     keep_ids_all  = set(gqs_df.loc[keep_all_mask, "clip_id"].tolist())
+
     deleted = 0
     for cid in dropped_ids:
         if cid in keep_ids_all:
-            continue   # safety: never delete a kept clip
+            continue
         p = CACHE_DIR / f"{cid}.npz"
         try:
             if p.exists():
                 p.unlink()
                 deleted += 1
         except Exception as e:
-            print(f"  WARN: could not delete dropped candidate {cid}: {e}")
+            print(f"  WARN: could not delete {cid}: {e}")
     print(f"  Dropped NPZs deleted: {deleted}")
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # Step 6b — Authoritative split_ubi.csv + gqs_summary_ubi.csv (kept clips)
-    # ═════════════════════════════════════════════════════════════════════════
     kept_df = gqs_df[keep_all_mask].copy()
 
-    # Rebuild the authoritative split CSV from the kept clips. Reload the
-    # provisional candidate inventory to recover the full per-clip columns, then
-    # filter to kept clip_ids. Column schema matches the original split_ubi.csv.
-    candidate_csv = PROC_MOUNT / "neg_candidates_ubi.csv"
-    inv_df = pd.read_csv(str(candidate_csv))
+    inv_df    = pd.read_csv(str(PROC_MOUNT / "neg_candidates_ubi.csv"))
     split_out = inv_df[inv_df["clip_id"].isin(keep_ids_all)].copy()
-    # Drop the source-fix-only helper columns from the public split CSV so it
-    # stays schema-compatible with downstream scripts (clip_id, etc.).
     for c in ("src_stem", "is_neg_cand"):
         if c in split_out.columns:
             split_out = split_out.drop(columns=[c])
     split_out.to_csv(str(SPLIT_CSV), index=False)
 
-    # Filtered GQS summary (kept clips only) — same columns as before, helper
-    # columns dropped.
     gqs_out = kept_df.drop(columns=[c for c in ("src_stem", "is_neg_cand")
                                     if c in kept_df.columns])
-    gqs_csv = PROC_MOUNT / "gqs_summary_ubi.csv"
-    gqs_out.to_csv(str(gqs_csv), index=False)
+    gqs_out.to_csv(str(PROC_MOUNT / "gqs_summary_ubi.csv"), index=False)
 
     print(f"\n{'='*60}")
-    print(f"Preprocessing complete.  Skipped: {skipped}")
-    print(f"NPZ files in {CACHE_DIR}: {len(list(CACHE_DIR.glob('*.npz')))}")
-    print(f"Kept clips: {len(kept_df)}  (split_ubi.csv rows: {len(split_out)})")
-    print("\nKept-clip counts by split x label:")
+    print(f"NPZ files: {len(list(CACHE_DIR.glob('*.npz')))}")
+    print(f"Kept clips: {len(kept_df)}")
     print(kept_df.groupby(["split", "label"]).size().to_string())
     cols = ["q_skel", "q_int", "q_obj", "q_po", "valid_ratio"]
-    print("\nGQS means by split x label (kept clips) — q_skel pos vs neg should "
-          "now be CLOSE (shortcut removed):")
+    print("\nGQS means (kept clips):")
     print(kept_df.groupby(["split", "label"])[cols].mean().round(3).to_string())
     print(f"{'='*60}")
-
-    overall = kept_df[cols].mean()
-    print("\nOverall GQS means (kept clips, V9 YOLO11x):")
-    for c in cols:
-        print(f"  {c:<15}: {overall[c]:.3f}")
-
     vol_proc.commit()
-    print("Volumes committed. Phase 1 complete.")
-    print(f"  Raw        → ubi-fights-raw      ({RAW_MOUNT})")
-    print(f"  Processed  → ubi-fights-processed ({PROC_MOUNT})")
+    print("Phase 1 complete.")
+
+
+# ── Orchestrator ──────────────────────────────────────────────────────────────
+@app.function(
+    image=image,
+    cpu=2,
+    memory=8192,
+    timeout=1200,  # just builds inventory + dispatches shards, no GPU
+    volumes={
+        str(RAW_MOUNT):  vol_raw,
+        str(PROC_MOUNT): vol_proc,
+    },
+    secrets=[modal.Secret.from_name(SECRET_NAME)],
+)
+def preprocess(force_reextract: bool = True) -> None:
+    import numpy as np
+    import pandas as pd
+    import json as _json
+    import zipfile as _zf
+    import math as _math
+
+    seed_everything(cfg.seed)
+    rng = random.Random(cfg.seed)
+
+    for d in [RAW_DIR, CACHE_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Clean slate: purge old NPZs so stale windows from a prior run do not survive
+    if force_reextract or cfg.force_reextract:
+        old_npz = list(CACHE_DIR.glob("*.npz"))
+        for p in old_npz:
+            try:
+                p.unlink()
+            except Exception as e:
+                print(f"  WARN: {p.name}: {e}")
+        if old_npz:
+            print(f"Clean slate: removed {len(old_npz)} old NPZs.")
+            vol_proc.commit()
+
+    # ── Step 1 — Kaggle download & extraction ────────────────────────────────
+    _token    = os.environ.get("KAGGLE_TOKEN",    "").strip()
+    _key      = os.environ.get("KAGGLE_KEY",      "").strip()
+    _username = os.environ.get("KAGGLE_USERNAME", "").strip()
+    if _token.startswith("{"):
+        kaggle_json = _token
+    elif _username and (_key or _token):
+        kaggle_json = _json.dumps({"username": _username, "key": _key or _token})
+    else:
+        kaggle_json = ""
+
+    zips = list(RAW_MOUNT.glob("*.zip"))
+    if not zips:
+        if not kaggle_json:
+            raise RuntimeError(
+                "No zip found and no Kaggle credentials. "
+                "Upload: modal volume put ubi-fights-raw ubi-fightsall.zip /ubi-fightsall.zip"
+            )
+        kdir = Path("/root/.kaggle")
+        kdir.mkdir(exist_ok=True)
+        (kdir / "kaggle.json").write_text(kaggle_json)
+        os.chmod(str(kdir / "kaggle.json"), 0o600)
+        print("Downloading UBI-Fights from Kaggle ...")
+        subprocess.run(["kaggle", "datasets", "download", "-d", cfg.kaggle_slug,
+                        "-p", str(RAW_MOUNT), "--quiet"], check=True)
+        vol_raw.commit()
+        zips = list(RAW_MOUNT.glob("*.zip"))
+
+    zip_path = zips[0]
+    print(f"Zip: {zip_path}")
+    marker = RAW_MOUNT / ".extracted"
+    if not marker.exists():
+        print("Extracting ...")
+        with _zf.ZipFile(zip_path, "r") as zf:
+            zf.extractall(str(RAW_MOUNT))
+        marker.touch()
+        vol_raw.commit()
+        print("Extraction done.")
+
+    candidates_root = [RAW_MOUNT/"UBI_FIGHTS", RAW_MOUNT/"UBI-FIGHTS",
+                       RAW_MOUNT/"ubi_fights",  RAW_MOUNT]
+    dataset_root = next(
+        (p for p in candidates_root if (p/"annotation").exists() or (p/"videos").exists()),
+        RAW_MOUNT,
+    )
+    print(f"Dataset root: {dataset_root}")
+    ann_dir    = dataset_root / "annotation"
+    video_root = dataset_root / "videos"
+    test_csv   = dataset_root / "test_videos.csv"
+    if not ann_dir.exists():    raise RuntimeError(f"annotation/ not found under {dataset_root}")
+    if not video_root.exists(): raise RuntimeError(f"videos/ not found under {dataset_root}")
+
+    # ── Step 2 — Test split ───────────────────────────────────────────────────
+    test_stems: set = set()
+    if test_csv.exists():
+        tc = pd.read_csv(str(test_csv), header=None)
+        for val in tc.iloc[:, 0]:
+            test_stems.add(Path(str(val)).stem)
+        print(f"Test split: {len(test_stems)} videos from test_videos.csv")
+    else:
+        print("WARNING: test_videos.csv not found — all clips assigned to train")
+
+    # ── Step 3 — Build clip inventory ────────────────────────────────────────
+    VIDEO_EXTS = {".avi", ".mp4", ".mov", ".mkv"}
+    ann_map: Dict[str, Path] = {}
+    for af in sorted(ann_dir.rglob("*")):
+        if af.is_file() and af.suffix in (".txt", ".csv", ""):
+            ann_map[af.stem] = af
+    vid_map: Dict[str, Path] = {}
+    for vf in sorted(video_root.rglob("*")):
+        if vf.is_file() and vf.suffix.lower() in VIDEO_EXTS:
+            vid_map[vf.stem] = vf
+    print(f"Annotation files: {len(ann_map)}  |  Video files: {len(vid_map)}")
+
+    train_cands = [s for s in sorted(ann_map.keys()) if s not in test_stems]
+    rng_val = random.Random(cfg.seed)
+    rng_val.shuffle(train_cands)
+    n_val = max(1, int(len(train_cands) * 0.20))
+    val_stems: set = set(train_cands[:n_val])
+    print(f"Val split: {len(val_stems)} videos (20% of non-test)")
+
+    rows: List[Dict] = []
+    for stem, ann_path in sorted(ann_map.items()):
+        vid_path = vid_map.get(stem)
+        if vid_path is None:
+            continue
+        split = ("test" if stem in test_stems
+                 else "val" if stem in val_stems
+                 else "train")
+        frame_labels = parse_annotation(ann_path)
+        if not frame_labels:
+            continue
+        n_ann     = len(frame_labels)
+        has_fight = any(l == 1 for l in frame_labels)
+        if has_fight:
+            for (fs, fe) in fight_intervals(frame_labels):
+                windows = clips_for_interval(fs, fe, n_ann, cfg.T)
+                for wi, _ in enumerate(windows):
+                    rows.append({
+                        "clip_id":      f"{stem}_fight_{fs}_{fe}_w{wi}",
+                        "video_path":   str(vid_path),
+                        "ann_path":     str(ann_path),
+                        "label":        1,
+                        "split":        split,
+                        "frame_start":  fs,
+                        "frame_end":    fe,
+                        "clip_type":    "positive",
+                        "n_ann_frames": n_ann,
+                        "window_idx":   wi,
+                        "src_stem":     stem,
+                        "is_neg_cand":  False,
+                    })
+        n_cand = max(cfg.neg_per_video,
+                     int(_math.ceil(cfg.neg_per_video * cfg.neg_oversample)))
+        neg_clips = negative_clip_indices(
+            frame_labels, n_ann, cfg.T, cfg.neg_per_video, rng,
+            n_candidates=n_cand)
+        for ni, idxs in enumerate(neg_clips):
+            rows.append({
+                "clip_id":      f"{stem}_nonfight_{ni}",
+                "video_path":   str(vid_path),
+                "ann_path":     str(ann_path),
+                "label":        0,
+                "split":        split,
+                "frame_start":  int(idxs[0]),
+                "frame_end":    int(idxs[-1]) + 1,
+                "clip_type":    "negative",
+                "n_ann_frames": n_ann,
+                "window_idx":   0,
+                "src_stem":     stem,
+                "is_neg_cand":  True,
+            })
+
+    all_df = pd.DataFrame(rows)
+    for col, default in [("window_idx", 0), ("src_stem", ""), ("is_neg_cand", False)]:
+        if col not in all_df.columns:
+            all_df[col] = default
+    all_df["window_idx"]  = all_df["window_idx"].fillna(0).astype(int)
+    all_df["is_neg_cand"] = all_df["is_neg_cand"].fillna(False).astype(bool)
+
+    n_neg_cand = int(all_df["is_neg_cand"].sum())
+    print(f"\nClip inventory: {len(all_df)} total  ({n_neg_cand} neg candidates, "
+          f"oversample={cfg.neg_oversample}, keep {cfg.neg_per_video}/video)")
+    print(all_df.groupby(["split", "label"]).size().to_string())
+
+    # Save provisional inventory (needed by _finalise to rebuild split CSV)
+    all_df.to_csv(str(PROC_MOUNT / "neg_candidates_ubi.csv"), index=False)
+    vol_proc.commit()
+
+    # ── Step 4 — Dispatch N_SHARDS parallel GPU containers ───────────────────
+    # Convert to plain dicts; Path objects are not Modal-serialisable
+    all_rows = [{k: str(v) if isinstance(v, Path) else v
+                 for k, v in r.items()}
+                for r in all_df.to_dict("records")]
+
+    shard_size = (len(all_rows) + N_SHARDS - 1) // N_SHARDS
+    shards = [all_rows[i*shard_size:(i+1)*shard_size] for i in range(N_SHARDS)]
+    shards = [s for s in shards if s]   # drop empty trailing shards
+    print(f"Dispatching {len(shards)} shards of ~{shard_size} clips each ...")
+
+    # starmap launches all shards in parallel; blocks until all complete
+    all_gqs_rows: List[Dict] = []
+    for result in _process_shard.starmap([(s, i) for i, s in enumerate(shards)]):
+        all_gqs_rows.extend(result)
+
+    print(f"All shards complete. Total GQS rows: {len(all_gqs_rows)}")
+
+    # ── Step 5 — Quality selection + write authoritative CSVs ────────────────
+    _finalise.remote(all_gqs_rows)
 
 
 # ── Local entrypoint ──────────────────────────────────────────────────────────
 @app.local_entrypoint()
 def main() -> None:
-    print("Guardian Eye V9 — UBI-Fights Phase 1: Preprocessing")
+    print("Guardian Eye V9 — UBI-Fights Phase 1: Preprocessing (parallel shards)")
     print("Run: modal run trigraph_v9_ubi_preprocess.py::preprocess")
     print("     modal run trigraph_v9_ubi_preprocess.py::preprocess --force-reextract")
