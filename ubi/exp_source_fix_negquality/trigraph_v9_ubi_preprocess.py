@@ -734,7 +734,10 @@ def _finalise(all_gqs_rows: list) -> None:
     image=image,
     cpu=2,
     memory=8192,
-    timeout=1200,  # just builds inventory + dispatches shards, no GPU
+    # Orchestrator BLOCKS on starmap until every shard finishes (~35-45 min each).
+    # Timeout must exceed the slowest shard + finalise, NOT just the dispatch work.
+    # 4 hours gives ample headroom for a slow/retried shard.
+    timeout=14400,
     volumes={
         str(RAW_MOUNT):  vol_raw,
         str(PROC_MOUNT): vol_proc,
