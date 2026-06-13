@@ -30,6 +30,12 @@ a gap it is flagged as such.
 15. [Version History (V4.2 → V8.x → V9)](#15-version-history)
 16. [Operational Notes & Costs](#16-operational-notes--costs)
 17. [Source Map](#17-source-map-vault-files-this-document-draws-from)
+18. [References](#18-references)
+
+> **Citations.** Inline markers `[n]` refer to the numbered reference list in Section 18, which
+> uses the **same numbering as the paper** (`guardian_eye_paper.bbl`, IEEE order of first
+> citation). A claim with `[n]` is grounded in that external work; claims without a marker are
+> grounded in the project vault (cited as `(Source: ...)`).
 
 ---
 
@@ -41,10 +47,10 @@ graduation project (AI & Data Science) targeting a Q1 research paper.
 
 **Core hypothesis.** Violence is a *relational* signal: it lives in person-person dynamics
 (proximity, relative velocity, sustained close engagement) and person-object grounding
-(weapon/body contact). Pure appearance models conflate *who is in the scene* with *what
-people are doing*, especially on low-res oblique CCTV. Guardian Eye encodes relational
+(weapon/body contact). Pure appearance models [1], [2] conflate *who is in the scene* with
+*what people are doing*, especially on low-res oblique CCTV. Guardian Eye encodes relational
 structure as explicit graphs and fuses them with a quality-aware gate.
-(Source: `entities/guardian-eye.md`)
+(Source: `entities/guardian-eye.md`; surveys of the field: [11], [12])
 
 **Three novelty claims** (Source: `concepts/tri-graph-architecture.md`, `concepts/quality-gated-fusion.md`, `concepts/gqs.md`):
 1. **Tri-Graph Architecture** — decompose the violence signal along three semantic axes,
@@ -55,9 +61,9 @@ structure as explicit graphs and fuses them with a quality-aware gate.
 3. **Graph Quality Scores (GQS)** — a 5-d quality vector computed at preprocessing time and
    stored per clip; the bridge between preprocessing quality and inference-time fusion.
 
-**What V9 adds over V8.1** — a fourth **appearance** stream (VideoMAE-Base), an enhanced
-12-channel skeleton ST-GCN with adaptive adjacency, and a Transformer temporal encoder for
-the interaction stream. (Source: `concepts/tri-graph-architecture.md`, `entities/guardian-eye.md`)
+**What V9 adds over V8.1** — a fourth **appearance** stream (VideoMAE-Base [1]), an enhanced
+12-channel skeleton ST-GCN [3], [4] with adaptive adjacency, and a Transformer temporal encoder
+for the interaction stream. (Source: `concepts/tri-graph-architecture.md`, `entities/guardian-eye.md`)
 
 ### Portfolio status (as of 2026-06-13)
 
@@ -128,9 +134,11 @@ training, forcing multi-stream robustness; disabled at inference. (Source: `sour
 
 ### Stream 1 — Skeleton (`EnhancedSTGCN`)
 
+A spatial-temporal graph convolutional network over the COCO skeleton, in the lineage of
+ST-GCN [3] with the adaptive-adjacency and multi-stream ideas of [4], [5].
 Input: `skeleton [B, T=32, M=6, V=17, 3]`. Feature engineering builds **12 input channels**
 from 4 channel types: joint (x,y,conf), bone (joint differences along COCO edges),
-joint-motion (temporal diffs of joints), bone-motion (temporal diffs of bone vectors).
+joint-motion (temporal diffs of joints), bone-motion (temporal diffs of bone vectors) [4].
 (Sources: `sources/v9-architecture.md`, `concepts/stgcn.md`)
 
 - 3 × `GraphTemporalConv` blocks, channels `[12 → 64 → 64 → 128]`.
@@ -147,7 +155,9 @@ Standalone params: ~71,715 (Ablation A). (Source: `analyses/v9-final-results-202
 ### Stream 2 — Interaction (`ImprovedInteraction`)
 
 Input: `int_nodes [B,T,M,7]`, `int_edges [B,T,M,M,4]`.
-- Per-frame **2-layer GATv2 with edge features**, 4 heads → `[B,T,M,128]`.
+- Per-frame **2-layer GATv2 [24] with edge features**, 4 heads → `[B,T,M,128]`. GATv2 [24] is
+  used over the original GAT [23] because its dynamic attention can rank neighbours conditioned
+  on edge content (e.g. small distance + high closing speed).
 - **Temporal Transformer encoder**: 2 layers, 4 heads, learned positional encoding, over
   T=32 frames (replaces the V8.1 BiGRU — Decision D5).
 - Attention pooling over T → `[B,128]`.
@@ -160,6 +170,8 @@ every attention row is `-inf` and a standard softmax produces NaN that collapses
 
 ### Stream 3 — Object / Person-Object (`ObjectPOStream`)
 
+Both branches use GINE [26] (the edge-feature-aware variant of GIN [25]), chosen so the message
+function conditions on edge semantics while retaining GIN's expressive power.
 Input: `obj_nodes [B,T,N,6]`, `po_edges [B,T,M,N,5]`.
 - **Object branch:** `FrameGINE` per frame → BiGRU over T → `[B,64]`.
 - **PO branch:** bipartite `FrameGINE` (person→object edges) per frame → BiGRU over T → `[B,64]`.
@@ -186,10 +198,10 @@ Output `[B,128]`. This projection MLP is the **only trainable part** of the appe
 in Phase 3; the ~86M VideoMAE backbone is never loaded during graph training.
 (Sources: `sources/v9-architecture.md`, `entities/videomae.md`)
 
-**Backbone facts:** `MCG-NJU/videomae-base`, ViT-B/16, ~86M params. VideoMAE-Base has **no CLS
-token** — mean-pool over patch tokens (`last_hidden_state`) → 768-d is mandatory. `vit_in_dim`
+**Backbone facts:** `MCG-NJU/videomae-base` [1], ViT-B/16, ~86M params. VideoMAE-Base has **no
+CLS token** — mean-pool over patch tokens (`last_hidden_state`) → 768-d is mandatory. `vit_in_dim`
 must be 768 (an earlier 384-d ViT-Small variant is not active). (Sources: `entities/videomae.md`,
-`concepts/staged-sequential-transfer.md`)
+`concepts/staged-sequential-transfer.md`; VideoMAE [1] follows the masked-autoencoder paradigm of [32])
 
 ---
 
@@ -222,6 +234,12 @@ fused = Σ w_i · stream_i
 ```
 Same weights for every sample; not GQS-conditioned. The control that isolates whether
 per-sample quality conditioning helps. (Sources: `sources/v9-architecture.md`, `concepts/quality-gated-fusion.md`)
+
+> Conditioning a combination on a routing signal is the basis of mixture-of-experts [30]; QGF
+> differs in that the gate is driven by an externally defined, analytic graph-quality signal
+> rather than by the features it weights, so the routing is both quality-aware and auditable.
+> The closest conceptual ancestor in violence detection is the optical-flow-quality-aware fusion
+> of [29], which folds quality into the fusion implicitly without exposing an explicit score.
 
 ### Gate behavior (RWF-2000 E_full_qgf, 400 test samples)
 
@@ -368,8 +386,9 @@ interrupted Phase 2 can't corrupt the cache; Phase 3 never imports HuggingFace T
 (Source: `sources/v9-rwf-preprocess.md`)
 
 What it does: download from Kaggle → discover videos → use official split → per video run
-YOLO11x-pose + ByteTrack (skeleton/interaction) and YOLO11x (objects) → build graph arrays +
-GQS → extract T_vit=16 frames @ 224×224 → save one NPZ + `split_v9.csv` + `gqs_summary_v9.csv`.
+YOLO11x-pose [33] + ByteTrack [34] (skeleton/interaction) and YOLO11x [33] (objects) → build
+graph arrays + GQS → extract T_vit=16 frames @ 224×224 → save one NPZ + `split_v9.csv` +
+`gqs_summary_v9.csv`.
 
 ### Constants (CFG)
 
@@ -450,8 +469,8 @@ again. (Source: `sources/v9-rwf-videomae.md`)
 
 (Sources: `sources/v9-rwf-videomae.md`, `concepts/training-protocol.md`, `entities/videomae.md`)
 
-Implementation: LLRD assigns head/norm id=0 (highest lr), `encoder.layer.i` → id=num_layers−i,
-patch embed → id=num_layers+1 (lowest). Augmentation (train only, consistent across all T
+Implementation: LLRD (layer-wise lr decay, following [32]) assigns head/norm id=0 (highest lr),
+`encoder.layer.i` → id=num_layers−i, patch embed → id=num_layers+1 (lowest). Augmentation (train only, consistent across all T
 frames): pad 224→256 reflect, random 224×224 crop, HorizontalFlip p=0.5, ColorJitter(0.2,0.2,0.2),
 no hue rotation; val/test centre-crop only. Checkpoint saves EMA `state_dict` only.
 (Source: `sources/v9-ubi-videomae.md`, `sources/v9-rwf-videomae.md`)
@@ -570,8 +589,8 @@ inspection + annotated mp4/contact-sheet export). (Sources: `analyses/v9-ubi-res
 
 ### RWF-2000 (COMPLETE — primary benchmark)
 
-Official 2,000 videos (1,600 train + 400 val, no separate test); V9 carves 10% stratified from
-train for internal val and uses the official val as test. Balanced classes.
+RWF-2000 [9]: official 2,000 videos (1,600 train + 400 val, no separate test); V9 carves 10%
+stratified from train for internal val and uses the official val as test. Balanced classes.
 (Source: `entities/rwf-2000.md`)
 
 Final ablation (fixed-GATv2 run, 2026-05-23):
@@ -602,13 +621,13 @@ Incremental contribution: skeleton 0.775 → +interaction +0.045 → +object +0.
   `1Kbw1bUw` (3 FN), `nuf-d5GugL0` / `2lrARl7utL4` (2 FP each).
 (Sources: `analyses/v9-final-results-2026-05-23.md`, `analyses/v9-diagnostics-results-2026-05-20.md`, `_hot.md`)
 
-SOTA bar: MSTFDet 95.2% MCA, RTPNet 93.3%, IDG-ViolenceNet 89.4% acc (metrics not directly
-comparable — Guardian Eye reports AUC + binary F1). (Source: `entities/rwf-2000.md`)
+SOTA bar: MSTFDet [13] 95.2% MCA, RTPNet 93.3%, IDG-ViolenceNet [28] 89.4% acc, CUE-Net [2]
+(metrics not directly comparable — Guardian Eye reports AUC + binary F1). (Source: `entities/rwf-2000.md`)
 
 ### RLVS — Real Life Violence Situations (COMPLETE)
 
-2,000 clips (1,000/1,000, perfectly balanced); seeded 80/10/10 stratified (seed=42); local WS
-(RTX 3090), no Modal. V1 baseline F1 ~0.819 / AUC ~0.884.
+RLVS [10]: 2,000 clips (1,000/1,000, perfectly balanced); seeded 80/10/10 stratified (seed=42);
+local WS (RTX 3090), no Modal. V1 baseline F1 ~0.819 / AUC ~0.884.
 (Source: `entities/rlvs.md`)
 
 | Exp | Streams | Acc | Macro-F1 | ROC-AUC | Params |
@@ -632,15 +651,15 @@ twin in train/val. Measured impact: removing the 36 leaked clips moved Macro-F1 
 pairs) was built; re-train deferred (Δ too small to justify GPU). **Open limitation:** a
 motion-presence shortcut — 99/111 low-`valid_ratio` clips are NonViolence (static scenes:
 eating, handshakes, walking), so "absence of motion" itself predicts NonViolence. Graph-only D
-(90.5%) still sits between ESTS-GCN's single pipeline (88.7%) and 3-model ensemble (~93%).
+(90.5%) still sits between ESTS-GCN's [22] single pipeline (88.7%) and 3-model ensemble (~93%).
 (Source: `entities/rlvs.md`)
 
 ### NTU CCTV-Fights (COMPLETE)
 
-1,000 fight videos, ALL annotated, **zero normal videos**; temporal segments `[start_s,end_s]`;
-official 500/250/250 split; sources Mobile 707 / CCTV 280 / Other 9 / Car 4 (mostly Mobile, not
-CCTV). Converted to binary clip classification by sliding window → 4,940 balanced clips
-(train 1209/1209, val 624/624, test 637/637). (Source: `entities/ntu-cctv-fights.md`)
+NTU CCTV-Fights [35]: 1,000 fight videos, ALL annotated, **zero normal videos**; temporal
+segments `[start_s,end_s]`; official 500/250/250 split; sources Mobile 707 / CCTV 280 / Other 9 /
+Car 4 (mostly Mobile, not CCTV). Converted to binary clip classification by sliding window →
+4,940 balanced clips (train 1209/1209, val 624/624, test 637/637). (Source: `entities/ntu-cctv-fights.md`)
 
 | Exp | Streams | Params | macro-F1 | ROC-AUC |
 |---|---|---|---|---|
@@ -674,8 +693,8 @@ clips/source), no within-video hard negatives → scene memorization. Not compar
 
 ### Hockey Fights (saturated, V8.1 baseline)
 
-1,000 clips (500/500), 70/10/20 split (seed=42). Domain: ice hockey broadcast (highly
-homogeneous, zero off-domain generalisation). **Label bug:** `nofights` contains substring
+Hockey Fights [8]: 1,000 clips (500/500), 70/10/20 split (seed=42). Domain: ice hockey broadcast
+(highly homogeneous, zero off-domain generalisation). **Label bug:** `nofights` contains substring
 `fights` — substring tests must check `nofights` first. Best: V8.1 `E_full_trigraph` Acc 0.930 /
 F1 0.9300 / AUC 0.9642. PO stream hurts here (object GQS ~0.111); retained with stream dropout.
 Used in the paper ablation/cross-dataset table, not as a headline. (Source: `entities/hockey-fights.md`)
@@ -922,6 +941,145 @@ problems-tackled-ubi-rwf.
 
 ---
 
+## 18. References
+
+Numbering matches the paper (`guardian_eye_paper.bbl`, IEEE order of first citation). Inline
+`[n]` markers throughout this document point here.
+
+[1] Z. Tong, Y. Song, J. Wang, and L. Wang, "VideoMAE: Masked autoencoders are data-efficient
+learners for self-supervised video pre-training," in *Adv. Neural Inf. Process. Syst. (NeurIPS)*,
+vol. 35, 2022, pp. 10078–10093.
+
+[2] D. C. Senadeera, X. Yang, D. Kollias, and G. Slabaugh, "CUE-Net: Violence detection video
+analytics with spatial cropping enhanced UniformerV2 and modified efficient additive attention,"
+in *Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. Workshops (CVPRW)*, 2024, pp. 4888–4897.
+
+[3] S. Yan, Y. Xiong, and D. Lin, "Spatial temporal graph convolutional networks for
+skeleton-based action recognition," in *Proc. AAAI Conf. Artif. Intell.*, vol. 32, no. 1, 2018.
+
+[4] L. Shi, Y. Zhang, J. Cheng, and H. Lu, "Two-stream adaptive graph convolutional networks for
+skeleton-based action recognition," in *Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit.
+(CVPR)*, 2019, pp. 12026–12035.
+
+[5] Y. Chen, Z. Zhang, C. Yuan, B. Li, Y. Deng, and W. Hu, "Channel-wise topology refinement
+graph convolution for skeleton-based action recognition," in *Proc. IEEE/CVF Int. Conf. Comput.
+Vis. (ICCV)*, 2021, pp. 13359–13368.
+
+[6] Z. Islam, M. Rukonuzzaman, R. Ahmed, M. H. Kabir, and M. Farazi, "Efficient two-stream
+network for violence detection using separable convolutional LSTM," in *Proc. Int. Joint Conf.
+Neural Netw. (IJCNN)*. IEEE, 2021, pp. 1–8.
+
+[7] P. Nardelli and D. Comminiello, "JOSENet: A joint stream embedding network for violence
+detection in surveillance videos," *arXiv preprint arXiv:2405.02961*, 2024.
+
+[8] E. Bermejo Nievas, O. Deniz Suarez, G. Bueno García, and R. Sukthankar, "Violence detection
+in video using computer vision techniques," in *Proc. 14th Int. Conf. Comput. Anal. Images
+Patterns (CAIP)*. Springer, 2011, pp. 332–339.
+
+[9] M. Cheng, K. Cai, and M. Li, "RWF-2000: An open large scale video database for violence
+detection," in *Proc. 25th Int. Conf. Pattern Recognit. (ICPR)*. IEEE, 2021, pp. 4183–4190.
+
+[10] M. M. Soliman, M. H. Kamal, M. A. E.-M. Nashed, Y. M. Mostafa, B. S. Chawky, and D. Khattab,
+"Violence recognition from videos using deep learning techniques," in *Proc. 9th Int. Conf.
+Intell. Comput. Inf. Syst. (ICICIS)*. IEEE, 2019, pp. 80–85.
+
+[11] F. U. M. Ullah, M. S. Obaidat, A. Ullah, K. Muhammad, M. Hijji, and S. W. Baik, "A
+comprehensive review on vision-based violence detection in surveillance videos," *ACM Comput.
+Surv.*, vol. 55, no. 10, pp. 1–44, 2023.
+
+[12] P. Negre, R. S. Alonso, A. González-Briones, J. Prieto, and S. Rodríguez-González,
+"Literature review of deep-learning-based detection of violence in video," *Sensors*, vol. 24,
+no. 12, p. 4016, 2024.
+
+[13] B. Qi, B. Wu, and B. Sun, "Automated violence monitoring system for real-time fistfight
+detection using deep learning-based temporal action localization," *Sci. Rep.*, vol. 15, no. 1,
+p. 29497, 2025.
+
+[14] F. J. Rendón-Segador, J. A. Álvarez-García, and L. M. Soria-Morillo, "Transformer and
+adaptive threshold sliding window for improving violence detection in videos," *Sensors*, vol. 24,
+no. 16, p. 5429, 2024.
+
+[15] W. Sultani, C. Chen, and M. Shah, "Real-world anomaly detection in surveillance videos," in
+*Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)*, 2018, pp. 6479–6488.
+
+[16] Y. Tian, G. Pang, Y. Chen, R. Singh, J. W. Verjans, and G. Carneiro, "Weakly-supervised
+video anomaly detection with robust temporal feature magnitude learning," in *Proc. IEEE/CVF Int.
+Conf. Comput. Vis. (ICCV)*, 2021, pp. 4975–4986.
+
+[17] Y. Chen, Z. Liu, B. Zhang, W. Fok, X. Qi, and Y.-C. Wu, "MGFN: Magnitude-contrastive
+glance-and-focus network for weakly-supervised video anomaly detection," in *Proc. AAAI Conf.
+Artif. Intell.*, vol. 37, no. 1, 2023, pp. 387–395.
+
+[18] Z. Liu, H. Zhang, Z. Chen, Z. Wang, and W. Ouyang, "Disentangling and unifying graph
+convolutions for skeleton-based action recognition," in *Proc. IEEE/CVF Conf. Comput. Vis.
+Pattern Recognit. (CVPR)*, 2020, pp. 143–152.
+
+[19] H. Duan, J. Wang, K. Chen, and D. Lin, "DG-STGCN: Dynamic spatial-temporal modeling for
+skeleton-based action recognition," *arXiv preprint arXiv:2210.05895*, 2022.
+
+[20] H. Yang, Z. Ren, H. Yuan, W. Wei, Q. Zhang, and Z. Zhang, "Multi-scale and attention
+enhanced graph convolution network for skeleton-based violence action recognition," *Front.
+Neurorobot.*, vol. 16, p. 1091361, 2022.
+
+[21] G. Garcia-Cobo and J. C. SanMiguel, "Human skeletons and change detection for efficient
+violence detection in surveillance videos," *Comput. Vis. Image Underst.*, vol. 233, p. 103739,
+2023.
+
+[22] N. F. Janbi, M. A. Ghaseb, and A. A. Almazroi, "ESTS-GCN: An ensemble spatial–temporal
+skeleton-based graph convolutional networks for violence detection," *Int. J. Intell. Syst.*,
+vol. 2024, p. 2323337, 2024.
+
+[23] P. Veličković, G. Cucurull, A. Casanova, A. Romero, P. Liò, and Y. Bengio, "Graph attention
+networks," in *Proc. Int. Conf. Learn. Represent. (ICLR)*, 2018.
+
+[24] S. Brody, U. Alon, and E. Yahav, "How attentive are graph attention networks?" in *Proc.
+Int. Conf. Learn. Represent. (ICLR)*, 2022.
+
+[25] K. Xu, W. Hu, J. Leskovec, and S. Jegelka, "How powerful are graph neural networks?" in
+*Proc. Int. Conf. Learn. Represent. (ICLR)*, 2019.
+
+[26] W. Hu, B. Liu, J. Gomes, M. Zitnik, P. Liang, V. Pande, and J. Leskovec, "Strategies for
+pre-training graph neural networks," in *Proc. Int. Conf. Learn. Represent. (ICLR)*, 2020.
+
+[27] J. Ji, R. Krishna, L. Fei-Fei, and J. C. Niebles, "Action genome: Actions as compositions of
+spatio-temporal scene graphs," in *Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)*,
+2020, pp. 10236–10247.
+
+[28] H. Huang and Q. Jiang, "IDG-ViolenceNet: A video violence detection model integrating
+identity-aware graphs and 3D-CNN," *Sensors*, vol. 25, no. 20, p. 6272, 2025.
+
+[29] Y. Xiao, G. Gao, L. Wang, and H. Lai, "Optical flow-aware-based multi-modal fusion network
+for violence detection," *Entropy*, vol. 24, no. 7, p. 939, 2022.
+
+[30] R. A. Jacobs, M. I. Jordan, S. J. Nowlan, and G. E. Hinton, "Adaptive mixtures of local
+experts," *Neural Comput.*, vol. 3, no. 1, pp. 79–87, 1991.
+
+[31] K. Li, Y. Wang, Y. He, Y. Li, Y. Wang, L. Wang, and Y. Qiao, "UniFormerV2: Unlocking the
+potential of image ViTs for video understanding," in *Proc. IEEE/CVF Int. Conf. Comput. Vis.
+(ICCV)*, 2023, pp. 1632–1643.
+
+[32] K. He, X. Chen, S. Xie, Y. Li, P. Dollár, and R. Girshick, "Masked autoencoders are scalable
+vision learners," in *Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)*, 2022, pp.
+16000–16009.
+
+[33] G. Jocher, J. Qiu, and A. Chaurasia, "Ultralytics YOLO11,"
+https://github.com/ultralytics/ultralytics, 2024.
+
+[34] Y. Zhang, P. Sun, Y. Jiang, D. Yu, F. Weng, Z. Yuan, P. Luo, W. Liu, and X. Wang,
+"ByteTrack: Multi-object tracking by associating every detection box," in *Proc. Eur. Conf.
+Comput. Vis. (ECCV)*. Springer, 2022, pp. 1–21.
+
+[35] M. Perez, A. C. Kot, and A. Rocha, "Detection of real-world fights in surveillance videos,"
+in *Proc. IEEE Int. Conf. Acoust. Speech Signal Process. (ICASSP)*. IEEE, 2019, pp. 2662–2666.
+
+> **Note.** References [6], [7], [14]–[21], [27], [31] are part of the paper's bibliography
+> (related-work and baseline context) but are not yet cited inline in this documentation; they
+> are listed here to keep the numbering identical to the paper. The UBI-Fights SOTA reference
+> (CvlBiLT, 98.56 AUC, cited in Section 13) is a vault source (`sources/bilt-three-stage-2024.md`)
+> that is not in the paper bibliography, so it carries no `[n]` number.
+
+---
+
 *Compiled 2026-06-13 from the Guardian Eye project vault. Every metric is traceable to the cited
 note; no values were estimated. Where the vault is silent, the gap is flagged above rather than
-filled.*
+filled. Reference numbering matches `guardian_eye_paper.bbl`.*
