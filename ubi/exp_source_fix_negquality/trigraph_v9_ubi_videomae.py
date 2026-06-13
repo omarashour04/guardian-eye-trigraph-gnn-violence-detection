@@ -92,9 +92,9 @@ class ViTCFG:
     img_size:        int   = 224
 
     # ── Fine-tuning ────────────────────────────────────────────────────────────
-    batch_size:      int   = 16     # A10G 24 GB VRAM + gradient checkpointing
+    batch_size:      int   = 24     # A10G 24 GB VRAM + gradient checkpointing; 32 OOMed, 24 is safe middle ground
     epochs:          int   = 50     # LLRD + warmup need more runway
-    patience:        int   = 10
+    patience:        int   = 6      # was 10; tightened to save compute. >warmup_epochs(5) so warmup isn't cut short
     min_ckpt_epoch:  int   = 3
 
     lr:              float = 1e-4
@@ -102,7 +102,7 @@ class ViTCFG:
     layer_decay:     float = 0.75   # LLRD per-layer decay factor
     weight_decay:    float = 0.05
     warmup_epochs:   int   = 5      # linear warmup before cosine decay
-    accum_steps:     int   = 4      # effective batch = 16 * 4 = 64
+    accum_steps:     int   = 3      # effective batch = 24 * 3 = 72; close to original 64
     grad_clip:       float = 1.0
     label_smoothing: float = 0.05
     mixup_alpha:     float = 0.4    # reduced from 0.8 — heavy mixup suppresses positive signal on imbalanced data
@@ -437,7 +437,7 @@ class ModelEMA:
     gpu="A10G",             # 24GB VRAM; batch_size=16 fits with gradient checkpointing
     cpu=4,
     memory=20480,           # 20 GB — train+val in-memory (~12 GB) + model/EMA/optimizer (~4 GB)
-    timeout=10800,          # 3 hours — fine-tune ~2h + Stage B ~20min; fail fast if stalled
+    timeout=14400,          # 4 hours — fine-tune ~3h + Stage B ~30min
     retries=1,              # 1 retry handles preemption; checkpoint resumes from last epoch
     volumes={str(PROC_MOUNT): vol_proc},
 )
@@ -680,10 +680,8 @@ def run_videomae(skip_finetune: bool = False,
             start_epoch  = ck["epoch"] + 1
             best_val_f1  = ck["val_macro_f1"]
             patience_cnt = 0
-            # Only EXTEND epoch budget, never shrink it.  Preemption mid-run
-            # would otherwise cap each resume at last_epoch+20 and shorten the
-            # total training compared to a fresh run that would reach 50.
-            vcfg.epochs  = max(vcfg.epochs, ck["epoch"] + 20)
+            # Keep vcfg.epochs fixed (50). Resume simply continues from where
+            # the checkpoint left off within the same 50-epoch budget.
             print(f"  Resumed from epoch {ck['epoch']}  "
                   f"(val_f1={ck['val_macro_f1']:.4f})  "
                   f"  Training will stop at epoch {vcfg.epochs}.")
