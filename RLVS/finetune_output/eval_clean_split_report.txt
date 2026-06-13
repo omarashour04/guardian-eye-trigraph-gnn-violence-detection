@@ -1,0 +1,43 @@
+RLVS V9 — CURRENT MODEL on CLEAN TEST SPLIT (quick directional eval)
+========================================================================
+old train clips: 1600  spanning 1371 scene clusters
+clean test clips with NPZ: 200 (missing 0)
+  of these, truly-unseen by old model (scene not in old train): 11
+device: cuda
+  Loading MCG-NJU/videomae-base from HuggingFace ...
+  Params: 86,229,505
+checkpoint epoch=46 thr=0.4400 (val_f1=0.9900)
+  Loading 200 clips into memory ...
+  Loaded 200 samples.
+wrote per-clip predictions -> C:\Violence detection\ashour\fresh\RLVS\finetune_output\clean_test_predictions.csv
+
+========================================================================
+METRICS  (fixed val-tuned threshold = 0.4400)
+========================================================================
+
+  [CLEAN-ALL  (every clean-test clip)]  n=200  (pos=100 / neg=100)
+    accuracy : 0.9950
+    macro_f1 : 0.9950
+    roc_auc  : 1.0000
+
+  [TRULY-UNSEEN (scene absent from old train — trustworthy)]  n=11  (pos=11 / neg=0)
+    accuracy : 1.0000
+    macro_f1 : 1.0000
+    roc_auc  : nan   (single-class)
+
+========================================================================
+VERDICT
+========================================================================
+  reported (old random split) : macro_f1 0.9950
+  CLEAN-ALL                   : macro_f1 0.9950
+  TRULY-UNSEEN (trust this)   : macro_f1 1.0000
+
+  TRULY-UNSEEN is the directional read on genuine generalization for
+  the CURRENT model. If it stays high, a full re-train on the clean
+  split will likely confirm a strong, defensible number. If it drops
+  a lot, the old score leaned on memorized scenes and the re-train is
+  essential before reporting anything.
+
+  NOTE: even TRULY-UNSEEN is only directional — the model still TRAINED
+  on the old data distribution. The publishable number requires a full
+  re-fine-tune on split_rlvs_clean.csv. This just tells you what to expect.

@@ -26,9 +26,16 @@ env/
 # NPZ clip data (large, on Modal volume)
 *.npz
 
-# CSV outputs — keep these (results, logs)
-# Uncomment below if you want to exclude them:
-# *.csv
+# Results, figures, and data artifacts — code-only repo, do not push these
+*.csv
+*.json
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+*.mpeg
+*.done
 
 # Kaggle credentials
 kaggle.json

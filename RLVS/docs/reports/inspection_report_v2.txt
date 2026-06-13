@@ -1,0 +1,212 @@
+RLVS V9 OUTPUT INSPECTION
+preproc dir : C:\Violence detection\ashour\fresh\RLVS\preproc_output
+finetune dir: C:\Violence detection\ashour\fresh\RLVS\finetune_output
+phash scan  : ON
+
+========================================================================
+1. SPLIT INTEGRITY
+========================================================================
+total rows: 2000
+by split  : {'train': 1600, 'val': 200, 'test': 200}
+by label  : {'1': 1000, '0': 1000}
+
+  train: n=1600  labels={'1': 800, '0': 800}
+  val  : n= 200  labels={'1': 100, '0': 100}
+  test : n= 200  labels={'1': 100, '0': 100}
+
+  OK       train & val: no shared clip_id
+  OK       train & test: no shared clip_id
+  OK       val & test: no shared clip_id
+  OK       every clip_id is unique across the whole file
+
+  VERDICT: clean — no clip_id leakage
+
+========================================================================
+2. NEAR-DUPLICATE STRADDLERS (numerically adjacent ids, different splits)
+========================================================================
+RLVS re-cuts the same scene under consecutive ids. Adjacent ids that land
+in DIFFERENT splits are the most likely scene-overlap leak. Eyeball these.
+
+  692 adjacent-id pairs cross a split boundary:
+    V_1(train,y=1)  |  V_2(val,y=1)  <- same label
+    V_2(val,y=1)  |  V_3(test,y=1)  <- same label
+    V_3(test,y=1)  |  V_4(train,y=1)  <- same label
+    V_4(train,y=1)  |  V_5(val,y=1)  <- same label
+    V_5(val,y=1)  |  V_6(train,y=1)  <- same label
+    V_13(train,y=1)  |  V_14(test,y=1)  <- same label
+    V_14(test,y=1)  |  V_15(val,y=1)  <- same label
+    V_15(val,y=1)  |  V_16(train,y=1)  <- same label
+    V_22(train,y=1)  |  V_23(val,y=1)  <- same label
+    V_23(val,y=1)  |  V_24(train,y=1)  <- same label
+    V_29(train,y=1)  |  V_30(val,y=1)  <- same label
+    V_30(val,y=1)  |  V_31(train,y=1)  <- same label
+    V_32(train,y=1)  |  V_33(val,y=1)  <- same label
+    V_33(val,y=1)  |  V_34(train,y=1)  <- same label
+    V_38(train,y=1)  |  V_39(val,y=1)  <- same label
+    V_39(val,y=1)  |  V_40(train,y=1)  <- same label
+    V_43(train,y=1)  |  V_44(test,y=1)  <- same label
+    V_44(test,y=1)  |  V_45(val,y=1)  <- same label
+    V_45(val,y=1)  |  V_46(train,y=1)  <- same label
+    V_52(train,y=1)  |  V_53(val,y=1)  <- same label
+    V_53(val,y=1)  |  V_54(train,y=1)  <- same label
+    V_65(train,y=1)  |  V_66(val,y=1)  <- same label
+    V_66(val,y=1)  |  V_67(train,y=1)  <- same label
+    V_68(train,y=1)  |  V_69(val,y=1)  <- same label
+    V_69(val,y=1)  |  V_70(train,y=1)  <- same label
+    V_72(train,y=1)  |  V_73(val,y=1)  <- same label
+    V_73(val,y=1)  |  V_74(train,y=1)  <- same label
+    V_87(train,y=1)  |  V_88(test,y=1)  <- same label
+    V_88(test,y=1)  |  V_89(train,y=1)  <- same label
+    V_89(train,y=1)  |  V_90(test,y=1)  <- same label
+    V_90(test,y=1)  |  V_91(train,y=1)  <- same label
+    V_95(train,y=1)  |  V_96(val,y=1)  <- same label
+    V_96(val,y=1)  |  V_97(train,y=1)  <- same label
+    V_97(train,y=1)  |  V_98(test,y=1)  <- same label
+    V_98(test,y=1)  |  V_99(train,y=1)  <- same label
+    V_102(train,y=1)  |  V_103(test,y=1)  <- same label
+    V_103(test,y=1)  |  V_104(train,y=1)  <- same label
+    V_107(train,y=1)  |  V_108(val,y=1)  <- same label
+    V_108(val,y=1)  |  V_109(train,y=1)  <- same label
+    V_119(train,y=1)  |  V_120(test,y=1)  <- same label
+    ... and 652 more
+
+  NOTE: adjacency is a heuristic, not proof of duplication. For a definitive
+  check, perceptual-hash the actual frames of these pairs (not done here to
+  keep this script fast/offline).
+
+========================================================================
+3. LOW-QUALITY CLIP AUDIT
+========================================================================
+rows: 2000
+  q_skel     : mean=0.886  min=0.000  max=1.000
+  q_int      : mean=0.515  min=0.000  max=1.000
+  q_obj      : mean=0.954  min=0.000  max=1.000
+  q_po       : mean=0.890  min=0.000  max=1.000
+  valid_ratio: mean=0.906  min=0.000  max=1.000
+
+  clips with valid_ratio < 0.5: 111
+  clips with ANY quality channel == 0.000: 341
+
+  low valid_ratio by split: {'train': 92, 'test': 9, 'val': 10}
+  low valid_ratio by label: {'1': 12, '0': 99}
+
+  worst 30 clips (clip_id, split, label, valid_ratio, q_skel/q_int/q_obj/q_po):
+    NV_48    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.91 po=0.00
+    NV_58    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.78 po=0.00
+    NV_126   train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.81 po=0.00
+    NV_89    train y=0 vr=0.000  skel=0.00 int=0.00 obj=1.00 po=0.00
+    NV_61    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.94 po=0.00
+    NV_366   train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.50 po=0.00
+    NV_50    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.91 po=0.00
+    NV_133   train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.91 po=0.00
+    NV_64    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.94 po=0.00
+    NV_86    train y=0 vr=0.000  skel=0.00 int=0.00 obj=1.00 po=0.00
+    NV_59    train y=0 vr=0.000  skel=0.00 int=0.00 obj=0.94 po=0.00
+    NV_53    val   y=0 vr=0.000  skel=0.00 int=0.00 obj=1.00 po=0.00
+    NV_164   val   y=0 vr=0.000  skel=0.00 int=0.00 obj=0.72 po=0.00
+    NV_415   test  y=0 vr=0.000  skel=0.00 int=0.00 obj=0.00 po=0.00
+    NV_90    test  y=0 vr=0.000  skel=0.00 int=0.00 obj=1.00 po=0.00
+    NV_482   train y=0 vr=0.031  skel=0.03 int=0.00 obj=0.03 po=0.03
+    NV_94    train y=0 vr=0.031  skel=0.03 int=0.00 obj=0.84 po=0.03
+    NV_123   train y=0 vr=0.031  skel=0.03 int=0.00 obj=0.94 po=0.03
+    NV_101   train y=0 vr=0.031  skel=0.03 int=0.00 obj=1.00 po=0.03
+    NV_68    train y=0 vr=0.031  skel=0.03 int=0.03 obj=0.69 po=0.03
+    NV_332   train y=0 vr=0.031  skel=0.00 int=0.00 obj=0.69 po=0.03
+    NV_496   train y=0 vr=0.031  skel=0.03 int=0.00 obj=0.16 po=0.00
+    NV_987   test  y=0 vr=0.031  skel=0.00 int=0.00 obj=0.47 po=0.00
+    NV_65    train y=0 vr=0.062  skel=0.03 int=0.00 obj=1.00 po=0.06
+    NV_52    train y=0 vr=0.062  skel=0.06 int=0.00 obj=0.91 po=0.06
+    NV_76    train y=0 vr=0.062  skel=0.06 int=0.00 obj=0.84 po=0.06
+    NV_595   val   y=0 vr=0.062  skel=0.06 int=0.00 obj=0.50 po=0.06
+    NV_365   test  y=0 vr=0.062  skel=0.06 int=0.00 obj=0.00 po=0.00
+    NV_57    train y=0 vr=0.094  skel=0.09 int=0.03 obj=0.88 po=0.09
+    NV_422   train y=0 vr=0.094  skel=0.09 int=0.00 obj=0.16 po=0.00
+
+  wrote full low-valid_ratio list -> C:\Violence detection\ashour\fresh\RLVS\preproc_output\low_quality_clips.csv
+
+========================================================================
+4. RESULTS SANITY
+========================================================================
+epochs logged       : 50
+val Macro-F1  start  : 0.7490  ->  end: 0.9900  (best 0.9900)
+val ROC-AUC   start  : 0.8174  ->  end: 0.9994  (best 0.9994)
+val F1 down-steps    : 1/49  (smooth)
+val AUC down-steps   : 0/49
+
+TEST accuracy : 0.995
+TEST macro_f1 : 0.9949998749968749
+TEST roc_auc  : 0.9998
+TEST threshold: 0.44  (tuned on val, applied to test — correct protocol)
+
+  targets: Macro-F1 >= 0.85, ROC-AUC >= 0.92
+  targets met : YES
+
+  *** YELLOW FLAG: test accuracy 0.995 exceeds the realistic RLVS
+      appearance ceiling (~0.95). On a test
+      split CUE-Net (2024) flagged as mislabelled, near-perfect scores
+      are more consistent with leakage/near-dups than with genuine skill.
+      -> trust this only after audits 1 & 2 come back clean.
+
+========================================================================
+5. PERCEPTUAL-HASH NEAR-DUPLICATE SCAN (hardened DCT-pHash, v2)
+========================================================================
+  config: 8 frames/clip, DCT pHash, frame match <= 8 bits, need >= 3 matching frames,
+          opposite-label pairs are SUPPRESSED (cannot be true dupes).
+
+  hashed 2000/2000 clips successfully (0 undecodable/missing)
+
+  duplicate clip-pairs (>= 3 matching frames, same label): 483 total
+    within-split (harmless): 344
+    CROSS-SPLIT (leakage risk): 139
+
+  TEST<->train/val duplicate pairs (inflate the score): 66
+    of which near-IDENTICAL (>= 7 frames, avg<= 4): 8
+    distinct TEST clips with a train/val twin: 36 / 200
+
+  most confident 25 cross-split pairs (more frames + lower hamming = surer):
+    NV_298(train,y=0)  ~  NV_297(test,y=0)  frames=8/8 avgH=0.0  *** TEST LEAK
+    NV_4(train,y=0)  ~  NV_5(val,y=0)  frames=8/8 avgH=0.0
+    NV_993(train,y=0)  ~  NV_994(val,y=0)  frames=8/8 avgH=0.0
+    NV_246(train,y=0)  ~  NV_248(test,y=0)  frames=8/8 avgH=0.75  *** TEST LEAK
+    NV_246(train,y=0)  ~  NV_245(test,y=0)  frames=8/8 avgH=1.5  *** TEST LEAK
+    NV_390(train,y=0)  ~  NV_389(val,y=0)  frames=8/8 avgH=2.5
+    NV_494(train,y=0)  ~  NV_493(val,y=0)  frames=8/8 avgH=3.5
+    NV_136(train,y=0)  ~  NV_125(test,y=0)  frames=8/8 avgH=3.5  *** TEST LEAK
+    NV_185(train,y=0)  ~  NV_188(test,y=0)  frames=8/8 avgH=3.5  *** TEST LEAK
+    NV_433(train,y=0)  ~  NV_434(test,y=0)  frames=8/8 avgH=3.75  *** TEST LEAK
+    NV_435(train,y=0)  ~  NV_434(test,y=0)  frames=8/8 avgH=4.25  *** TEST LEAK
+    NV_187(train,y=0)  ~  NV_183(test,y=0)  frames=8/8 avgH=4.25  *** TEST LEAK
+    NV_939(train,y=0)  ~  NV_937(val,y=0)  frames=8/8 avgH=4.25
+    NV_940(train,y=0)  ~  NV_937(val,y=0)  frames=8/8 avgH=4.5
+    NV_186(train,y=0)  ~  NV_188(test,y=0)  frames=8/8 avgH=4.5  *** TEST LEAK
+    NV_185(train,y=0)  ~  NV_103(test,y=0)  frames=8/8 avgH=4.5  *** TEST LEAK
+    NV_186(train,y=0)  ~  NV_103(test,y=0)  frames=8/8 avgH=4.75  *** TEST LEAK
+    NV_187(train,y=0)  ~  NV_188(test,y=0)  frames=8/8 avgH=4.75  *** TEST LEAK
+    NV_187(train,y=0)  ~  NV_103(test,y=0)  frames=8/8 avgH=4.75  *** TEST LEAK
+    NV_938(train,y=0)  ~  NV_937(val,y=0)  frames=8/8 avgH=5.25
+    NV_189(train,y=0)  ~  NV_188(test,y=0)  frames=8/8 avgH=5.5  *** TEST LEAK
+    NV_952(train,y=0)  ~  NV_937(val,y=0)  frames=8/8 avgH=5.75
+    NV_726(train,y=0)  ~  NV_727(val,y=0)  frames=8/8 avgH=6.25
+    NV_724(train,y=0)  ~  NV_727(val,y=0)  frames=8/8 avgH=6.25
+    NV_729(train,y=0)  ~  NV_727(val,y=0)  frames=8/8 avgH=6.5
+
+  wrote all cross-split pairs -> C:\Violence detection\ashour\fresh\RLVS\preproc_output\phash_cross_split_pairs.csv
+  wrote test-leak pairs only  -> C:\Violence detection\ashour\fresh\RLVS\preproc_output\phash_test_leakage_pairs.csv
+
+  VERDICT: 36 of 200 test clips have a near-duplicate
+           twin in train/val (8 of them near-identical).
+           This is real leakage and it inflates the 0.995. Fix by
+           regenerating a GROUP-AWARE split (scene clusters stay on one
+           side) OR removing these test clips before reporting metrics.
+
+========================================================================
+SUMMARY
+========================================================================
+  - Audit 1 (leakage) is the gatekeeper. If it says clean and Audit 2 shows
+    no suspicious adjacent straddlers, the 0.995 is more believable.
+  - Audit 2 only flags candidates by id-adjacency; Audit 5 (--phash) is the
+    definitive frame-level check.
+  - Audit 3 wrote low_quality_clips.csv — open a few of those .mp4s to confirm
+    they are genuinely unusable (dark/blurred/cropped), not a decode bug.
+  - Audit 5 wrote phash_cross_split_pairs.csv and phash_test_leakage_pairs.csv.
+    The test-leakage file is the one that matters for the 0.995.

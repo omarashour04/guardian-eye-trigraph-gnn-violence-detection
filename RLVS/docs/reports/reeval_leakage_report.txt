@@ -1,0 +1,42 @@
+RLVS V9 — TEST RE-EVALUATION WITH LEAKAGE SEPARATED
+========================================================================
+leaked test clip_ids (have a train/val near-dup twin): 36
+  ['NV_103', 'NV_125', 'NV_171', 'NV_179', 'NV_183', 'NV_188', 'NV_191', 'NV_192', 'NV_226', 'NV_241', 'NV_245', 'NV_248', 'NV_297', 'NV_300', 'NV_341', 'NV_415', 'NV_429', 'NV_434', 'NV_488', 'NV_511', 'NV_521', 'NV_630', 'NV_655', 'NV_684', 'NV_688', 'NV_698', 'NV_741', 'NV_759', 'NV_868', 'NV_887', 'NV_90', 'NV_920', 'NV_951', 'NV_984', 'NV_987', 'V_90']
+
+test clips with NPZ present: 200 (missing 0)
+device: cuda
+  Loading MCG-NJU/videomae-base from HuggingFace ...
+  Params: 86,229,505
+loaded best checkpoint: epoch=46  val_f1=0.9900  threshold=0.4400
+  Loading 200 clips into memory ...
+  Loaded 200 samples.
+wrote per-clip predictions -> C:\Violence detection\ashour\fresh\RLVS\finetune_output\test_predictions.csv
+
+========================================================================
+METRICS  (fixed val-tuned threshold = 0.4400)
+========================================================================
+
+  [FULL  test (reproduces the reported number)]  n=200  (pos=100 / neg=100)
+    accuracy : 0.9950
+    macro_f1 : 0.9950
+    roc_auc  : 0.9998
+
+  [CLEAN test (no train/val twin — honest score)]  n=164  (pos=99 / neg=65)
+    accuracy : 0.9939
+    macro_f1 : 0.9936
+    roc_auc  : 0.9998
+
+  [LEAKED clips only (what leakage was buying)]  n=36  (pos=1 / neg=35)
+    accuracy : 1.0000
+    macro_f1 : 1.0000
+    roc_auc  : 1.0000
+
+========================================================================
+VERDICT
+========================================================================
+  FULL  macro_f1 0.9950  ->  CLEAN macro_f1 0.9936   (drop +0.0014)
+  FULL  accuracy 0.9950  ->  CLEAN accuracy 0.9939   (drop +0.0011)
+
+  The CLEAN score barely moves: leakage was NOT the main driver of
+  the high number. The model genuinely separates this test set.
+  (Still rebuild a group-aware split for a defensible protocol.)
