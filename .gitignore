@@ -28,6 +28,8 @@ env/
 
 # Results, figures, and data artifacts — code-only repo, do not push these
 *.csv
+# Exception: paper_data CSVs are ground-truth inference results (small, version-controlled)
+!paper_data/**/*.csv
 *.json
 *.png
 *.jpg
@@ -61,3 +63,25 @@ desktop.ini
 
 # Old / scratch folders (already archived in old/)
 # Keep old/ in the repo so history is preserved
+
+# ── Demo system exceptions ────────────────────────────────────────────────────
+# Allow pre-built FAISS indexes (small, needed at runtime)
+!"full model , demo/Demo Implementation/FULL_RAG_Pipeline/data/*.index"
+# Allow RAG data files that are small and version-controlled
+!"full model , demo/Demo Implementation/FULL_RAG_Pipeline/data/reference_metadata.json"
+!"full model , demo/Demo Implementation/FULL_RAG_Pipeline/data/incident_vector_metadata.json"
+!"full model , demo/Demo Implementation/FULL_RAG_Pipeline/data/legal_chunks.json"
+!"full model , demo/Demo Implementation/FULL_RAG_Pipeline/data/legal_raw_documents.json"
+# Allow frontend config files that happen to be JSON
+!"full model , demo/Demo Implementation/FrontEnd/package.json"
+!"full model , demo/Demo Implementation/FrontEnd/package-lock.json"
+!"full model , demo/Demo Implementation/FrontEnd/tsconfig*.json"
+!"full model , demo/Demo Implementation/FrontEnd/components.json"
+# Allow demo video samples (small clips for gallery — cam1/cam2/cam3 only)
+!"full model , demo/Demo Implementation/BackEnd/cam*.mp4"
+# Ignore generated runtime artifacts
+"full model , demo/Demo Implementation/BackEnd/static/uploads/"
+"full model , demo/Demo Implementation/BackEnd/static/overlays/"
+"full model , demo/Demo Implementation/BackEnd/static/thumbnails/"
+"full model , demo/Demo Implementation/BackEnd/cache_npz/"
+"full model , demo/Demo Implementation/BackEnd/db/*.db"

@@ -1,0 +1,13 @@
+Example 1:
+
+Two individuals rapidly approached each other and physical contact occurred.
+
+Violence detected.
+
+---
+
+Example 2:
+
+People stood and talked without aggressive actions.
+
+Non-violence detected.

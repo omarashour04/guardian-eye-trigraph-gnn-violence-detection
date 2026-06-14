@@ -1,0 +1,14 @@
+sentence-transformers
+faiss-cpu
+numpy
+pandas
+torch
+transformers
+pydantic
+accelerate
+requests
+beautifulsoup4
+trafilatura
+pymupdf
+pypdf
+lxml

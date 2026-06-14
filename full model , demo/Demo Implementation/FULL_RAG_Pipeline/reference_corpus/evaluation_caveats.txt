@@ -1,0 +1,7 @@
+Classifier outputs clip-level predictions only.
+
+Timing claims are geometry-derived.
+
+Person-level attribution is heuristic.
+
+The VLM must not override classifier verdicts.
