@@ -1,0 +1,11 @@
+INFO:     Will watch for changes in these directories: ['D:\\sara\\graduation\\Demo Implementation\\BackEnd']
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [26272] using WatchFiles
+INFO:     Started server process [26448]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  WatchFiles detected changes in 'overlay_service.py'. Reloading...
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [26448]
