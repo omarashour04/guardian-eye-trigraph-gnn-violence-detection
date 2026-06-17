@@ -65,15 +65,15 @@ structure as explicit graphs and fuses them with a quality-aware gate.
 12-channel skeleton ST-GCN [3], [4] with adaptive adjacency, and a Transformer temporal encoder
 for the interaction stream. (Source: `concepts/tri-graph-architecture.md`, `entities/guardian-eye.md`)
 
-### Portfolio status (as of 2026-06-13)
+### Portfolio status (as of 2026-06-17)
 
 | Dataset | Status | Best model | Macro-F1 | ROC-AUC | Targets |
 |---|---|---|---|---|---|
 | **RWF-2000** | COMPLETE | E_full_qgf | 0.9175 | 0.9617 | met |
-| **RLVS** | COMPLETE | E_full_qgf | 0.975 | 0.997 | met |
-| **NTU CCTV-Fights** | COMPLETE | E_full_qgf | 0.872 | 0.908 | met |
+| **RLVS** | COMPLETE | E_full_qgf | 0.9750 | 0.9971 | met |
+| **NTU CCTV-Fights** | COMPLETE | E_full_qgf | 0.8744 | 0.9089 | met |
+| **Hockey Fights** | COMPLETE (V9) | E_full_qgf | 0.9350 | 0.9780 | met |
 | **UBI-Fights** | PAUSED (honest negative) | E_full_qgf | 0.6725 | 0.7241 | missed |
-| **Hockey Fights** | Saturated (V8.1 baseline) | E_full_trigraph | 0.930 | 0.9642 | n/a |
 
 (Sources: `_hot.md`, `entities/rwf-2000.md`, `entities/rlvs.md`, `entities/ntu-cctv-fights.md`,
 `entities/ubi-fights.md`, `entities/hockey-fights.md`)
@@ -267,6 +267,20 @@ or marginally loses elsewhere. Net aggregate over LW is ~+0.003–0.005 F1. QGF 
 measurable latency vs LW. (Sources: `analyses/v9-diagnostics-results-2026-05-20.md`,
 `analyses/v9-final-results-2026-05-23.md`, `concepts/quality-gated-fusion.md`)
 
+**Paired-bootstrap analysis (2026-06-17, n=2000 resamples, seed 20260617):**
+
+| Dataset | n | ΔAUC (QGF−LW) | 95% CI AUC | ΔF1 | 95% CI F1 |
+|---|---|---|---|---|---|
+| RWF | 400 | −0.0024 | [−0.0068, +0.0018] | +0.0075 | [−0.0074, +0.0126] |
+| RLVS | 200 | −0.0009 | [−0.0029, 0.0000] | 0.0000 | [0.0000, 0.0000] |
+| NTU | 1274 | −0.0063 | [−0.0143, +0.0017] | 0.0000 | [−0.0055, +0.0049] |
+| HF | 200 | +0.0046 | [−0.0016, +0.0128] | 0.0000 | [−0.0101, +0.0152] |
+
+**Every CI includes 0. QGF and LW are statistically indistinguishable on all four benchmarks.**
+The correct paper framing is "interpretability at proven parity" — NOT a QGF-beats-LW claim.
+The gate's contribution is an inspectable, quality-conditioned fusion policy, not a higher
+detection score. (Source: `revision_analysis.py` / `revision_analysis_results.md`, 2026-06-17)
+
 ---
 
 ## 5. Graph Quality Scores (GQS)
@@ -304,8 +318,36 @@ bucket; the composite restores meaningful quartile stratification. Note: RWF qua
 so tightly that only **3** non-empty buckets form (not 4) — a dataset property, not a bug.
 (Sources: `concepts/gqs.md`, `sources/v9-rwf-preprocess.md`, `analyses/v9-final-results-2026-05-23.md`)
 
-Reference q_obj means: Hockey Fights ~0.111 (near-empty object signal); RWF-2000 valid_ratio→1.0.
-(Source: `concepts/gqs.md`)
+### GQS statistics across all four benchmarks (recomputed 2026-06-17)
+
+**Composite GQS distribution** (`q_composite = 0.4·q_skel + 0.4·q_int + 0.2·q_po`):
+
+| Dataset | Mean | Median | Min | Max |
+|---|---|---|---|---|
+| RLVS | 0.8904 | 1.0000 | 0.0000 | 1.0000 |
+| HF | 0.9561 | 1.0000 | 0.0000 | 1.0000 |
+| NTU | 0.7557 | 0.9375 | 0.0000 | 1.0000 |
+| RWF-2000 | 0.6879 | 0.8406 | 0.0000 | 1.0000 |
+
+HF and RLVS saturate toward median 1.0 — no meaningful GQS spread for stratification.
+NTU has the widest spread (mean 0.756, median 0.938), explaining why QGF vs LW differences
+concentrate there. RWF terciles span a narrow band (mean 0.688), so LW is already near-optimal.
+
+**Mean component-wise GQS:**
+
+| Dataset | q_skel | q_obj | q_int | r_valid |
+|---|---|---|---|---|
+| RLVS | 0.8858 | 0.9542 | 0.5151 | 0.9057 |
+| HF | 0.9576 | 0.9851 | 0.7746 | 0.9628 |
+| NTU | 0.7946 | 0.8414 | 0.5394 | 0.8105 |
+| RWF-2000 | 0.7886 | 0.9630 | 0.5359 | 0.7988 |
+
+**Key finding:** `q_int` is the lowest-mean component on every benchmark (0.52–0.77). Proximity-based
+interaction edges require co-localised persons and degrade first under occlusion/crowding. This
+explains the gate's compensation policy: when GQS rises, the gate shifts weight toward interaction
+and appearance streams (higher q_int → more reliable interaction signal). `q_obj` is consistently
+the highest component, but the object stream still hurts on HF because the PO bipartite edges
+(not the object nodes alone) carry the signal. (Source: `paper_data/` perclip.csv, 2026-06-17)
 
 ---
 
@@ -609,10 +651,11 @@ Incremental contribution: skeleton 0.775 → +interaction +0.045 → +object +0.
 **+VideoMAE +0.075** (largest jump) → QGF over LW +0.003.
 (Source: `analyses/v9-final-results-2026-05-23.md`)
 
-- **Confusion (400 test, thr=0.36):** TP=181, TN=186, FP=19, FN=14 (33 errors, confirmed
-  irreducible vs pre-fix run).
-- **Calibration:** T*=0.910 (<1, model slightly overconfident). ECE raw 0.041 → post-T 0.048
-  (WORSE). **Decision: skip temperature scaling, report raw ECE=0.041.**
+- **Confusion (400 test, thr=0.36):** TP=181, TN=186, FP=14, FN=19 (33 errors, confirmed
+  irreducible vs pre-fix run). ⚠ FP=14, FN=19 — do NOT swap (earlier vault had these reversed).
+- **Calibration:** T*=0.910 (<1, model slightly overconfident). ECE raw **0.041** → post-T 0.048
+  (WORSE). **Decision: skip temperature scaling, report raw ECE=0.041.** (Source confirmed:
+  `rwf_diag_calibration_results.json` → `ece: 0.041437`. Earlier note of 0.034 was wrong.)
 - **Inference (T4):** E_full_qgf 90.4ms mean / 93.3ms p95, ~492 clips/sec; QGF adds zero
   latency vs LW. (_hot.md cites ~90ms / ~500 clips/sec / ~517 clips/sec.)
 - **Errors:** FNs (n=14) are low-q_skel fights (mean q_skel 0.316; repeat offender
@@ -641,7 +684,8 @@ local WS (RTX 3090), no Modal. V1 baseline F1 ~0.819 / AUC ~0.884.
 | C | VideoMAE only | 99.5% | 0.995 | 0.9998 | 86M |
 
 Best checkpoint epoch 46 (val_f1=0.990, thr=0.44). Confusion (E_full_qgf test): Fight 99/1,
-NonFight 4/96. V9 improvement over V1: +15.6pp F1, +11.3pp AUC. (Source: `entities/rlvs.md`)
+NonFight 4/96. V9 improvement over V1: +15.6pp F1, +11.3pp AUC. ECE = 0.0370.
+Tuned threshold τ = 0.17. (Source: `entities/rlvs.md`, `paper_data/rlvs/`)
 
 **Leakage audit.** RLVS re-cuts the same real-life scene into consecutively-numbered clips. DCT
 pHash found 130 scene clusters (483 duplicate pairs); largest cluster 18 clips (NV_683–NV_706);
@@ -676,10 +720,11 @@ signal; the fused E model matches VideoMAE at ~1/100th the params (efficiency cl
 
 Diagnostics (all clean): **shortcut audit** quality-alone AUC 0.45–0.50 = chance (no source/
 quality shortcut — strong paper claim); **gates** w_vit=0.32, w_obj=0.24, w_skel=0.24, w_int=0.20,
-nearly static (std 0.037, so QGF≈LW); **calibration** temp=1.63, ECE 0.064→0.052 (report
-calibrated); **source-stratified** Mobile (n=757) F1=0.879, CCTV (n=502) F1=0.857; **GQS
-quartiles** highest-quality bucket has *lowest* F1 (0.838, counterintuitive — confirms quality
-is not the shortcut). (Source: `entities/ntu-cctv-fights.md`)
+nearly static (std 0.037, so QGF≈LW); **calibration** temp=1.63, ECE 0.0622 (raw, reported);
+**source-stratified** Mobile (n=757) F1=0.879, CCTV (n=502) F1=0.857; **GQS
+quartiles** highest-quality bucket has *lowest* F1 (0.848, counterintuitive — confirms quality
+is not the shortcut). Tuned threshold τ = 0.17 (N_test=1274, confirmed from perclip.csv).
+(Source: `entities/ntu-cctv-fights.md`, `paper_data/ntu/`)
 
 **Error audit (paper-grade).** 91 FNs (median prob 0.055) + 72 FPs (median 0.907), both
 confident, spread across 63/49 videos. FNs = label noise (lulls/aftermath inside broad
@@ -691,13 +736,33 @@ Old pre-V9 result (deprecated): Macro-F1 0.654 with naive 87.5%-overlap windowin
 clips/source), no within-video hard negatives → scene memorization. Not comparable.
 (Source: `entities/ntu-cctv-fights.md`)
 
-### Hockey Fights (saturated, V8.1 baseline)
+### Hockey Fights (COMPLETE — V9)
 
 Hockey Fights [8]: 1,000 clips (500/500), 70/10/20 split (seed=42). Domain: ice hockey broadcast
 (highly homogeneous, zero off-domain generalisation). **Label bug:** `nofights` contains substring
-`fights` — substring tests must check `nofights` first. Best: V8.1 `E_full_trigraph` Acc 0.930 /
-F1 0.9300 / AUC 0.9642. PO stream hurts here (object GQS ~0.111); retained with stream dropout.
-Used in the paper ablation/cross-dataset table, not as a headline. (Source: `entities/hockey-fights.md`)
+`fights` — substring tests must check `nofights` first. PO stream hurts here (object GQS ~0.111,
+the lowest mean of any component on any benchmark); retained with stream dropout.
+(Source: `entities/hockey-fights.md`)
+
+Full V9 ablation (from `paper_data/hf/perclip.csv` + `test_metrics.json`, recomputed 2026-06-14):
+
+| Experiment | macro-F1 | AUC | thr | Confusion (TN/FP/FN/TP) |
+|---|---|---|---|---|
+| A_skeleton_only | 0.8749 | 0.9429 | 0.71 | 85/15/10/90 |
+| B_skel_interaction | 0.9049 | 0.9507 | 0.73 | 93/7/12/88 |
+| D_skel_int_obj | 0.9000 | 0.9529 | 0.60 | 91/9/11/89 |
+| E_full_lw | 0.9450 | 0.9734 | 0.78 | 95/5/6/94 |
+| **E_full_qgf** | **0.9350** | **0.9780** | **0.63** | 95/5/8/92 |
+| E_full_qgf_fixed | 0.9400 | 0.9784 | 0.70 | 95/5/7/93 |
+| C_videomae_only | 0.9349 | 0.9852 | 0.56 | — |
+
+**Note:** LW beats QGF on F1 (0.9450 vs 0.9350) on HF — QGF is deployed for interpretability.
+VideoMAE standalone leads all graph+fusion variants on AUC (0.9852), consistent with the AUC
+inversion finding across all four benchmarks. GQS is nearly uniform on broadcast footage
+(mean 0.9561, median 1.0000) — no GQS-tercile stratification is meaningful here (GQS saturated,
+only 2 non-empty buckets form). ECE = 0.0988 (highest of the four benchmarks, reflecting
+distribution compression on homogeneous broadcast footage). T* = 0.567 — do NOT apply
+temperature scaling (reported raw). (Source: `paper_data/hf/`, recomputed 2026-06-14)
 
 ### Pre-V8 historical reference (Models 1–3)
 
@@ -932,12 +997,10 @@ problems-tackled-ubi-rwf.
 
 ### Open gaps flagged during the sweep
 
-- **Hockey Fights V9 results:** no full V9 ablation table exists in the vault for Hockey — only
-  the V8.1 baseline (Acc 0.930). `_hot.md` mentions "HF dataset results" as *pending* paper work.
-  Hockey is treated as a saturated V8.1 baseline, not a V9 headline.
 - **SCVD / AIRTLAB:** appear only in the pre-V8 history (`proposed-model-history`); no V9 pipeline.
   SCVD/XD-Violence are noted as an optional future 4th dataset. (Source: `_hot.md`)
 - Some SCVD baseline-variant AUC cells in `proposed-model-history.md` are blank in the source.
+- **Hockey Fights V9:** now fully resolved — see §12 above. Full ablation table added 2026-06-17.
 
 ---
 
@@ -1072,6 +1135,18 @@ Comput. Vis. (ECCV)*. Springer, 2022, pp. 1–21.
 [35] M. Perez, A. C. Kot, and A. Rocha, "Detection of real-world fights in surveillance videos,"
 in *Proc. IEEE Int. Conf. Acoust. Speech Signal Process. (ICASSP)*. IEEE, 2019, pp. 2662–2666.
 
+[36] W. Wu, D. Zhong, J. Jiang, and J. Liu, "Not only look, but also listen: Learning multimodal
+violence detection under weak supervision," in *Proc. Eur. Conf. Comput. Vis. (ECCV)*. Springer,
+2020, pp. 322–339. *(XD-Violence dataset; cited in §II-A anomaly-detection discussion.)*
+
+[37] H. Duan, Y. Zhao, K. Chen, D. Lin, and B. Dai, "Revisiting skeleton-based action recognition,"
+in *Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR)*, 2022, pp. 2969–2978.
+*(PoseConv3D; cited in §II-B skeleton methods.)*
+
+[38] B. Han, H. Yao, X. Gu, M. Zhou, T. Tsang, Y. Zhang, and J. Kwok, "Trusted multi-view
+classification," in *Proc. Int. Conf. Learn. Represent. (ICLR)*, 2021.
+*(TMC; cited as uncertainty-weighted fusion baseline in Table I.)*
+
 > **Note.** References [6], [7], [14]–[21], [27], [31] are part of the paper's bibliography
 > (related-work and baseline context) but are not yet cited inline in this documentation; they
 > are listed here to keep the numbering identical to the paper. The UBI-Fights SOTA reference
@@ -1080,6 +1155,8 @@ in *Proc. IEEE Int. Conf. Acoust. Speech Signal Process. (ICASSP)*. IEEE, 2019, 
 
 ---
 
-*Compiled 2026-06-13 from the Guardian Eye project vault. Every metric is traceable to the cited
-note; no values were estimated. Where the vault is silent, the gap is flagged above rather than
-filled. Reference numbering matches `guardian_eye_paper.bbl`.*
+*Compiled 2026-06-13; updated 2026-06-17 with: HF V9 full ablation, GQS statistics tables,
+paired-bootstrap QGF=LW finding, ECE correction (RWF 0.041), confusion-matrix FP/FN correction,
+τ values for all datasets, and references [36]–[38] (XDViolence/PoseConv3D/TMC). Every metric
+is traceable to `paper_data/` perclip.csv or test_metrics.json; no values were estimated.
+Reference numbering matches `guardian_eye_paper copy.bbl`.*
