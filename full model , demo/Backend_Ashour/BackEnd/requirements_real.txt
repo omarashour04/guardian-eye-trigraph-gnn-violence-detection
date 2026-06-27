@@ -1,0 +1,21 @@
+# Guardian Eye — real inference dependencies
+# Install AFTER requirements.txt (which covers FastAPI + SQLite stack)
+#
+# pip install -r requirements.txt
+# pip install -r requirements_real.txt
+#
+# PyTorch: install the CUDA 12.x build from https://pytorch.org/get-started/locally/
+# e.g.:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+torch>=2.1
+torchvision
+ultralytics>=8.3          # YOLO11x-pose + YOLO11x (auto-downloads weights on first use)
+transformers>=4.57.3       # VideoMAE, Qwen2.5-VL, and TranslateGemma native template
+bitsandbytes>=0.43         # Optional 4-bit quantization for TranslateGemma/Qwen
+accelerate>=0.30
+qwen-vl-utils              # Qwen2.5-VL image/video input utilities
+autoawq                    # Optional: AWQ loader support for Qwen2.5-VL-3B/LLM narration
+optimum                    # Optional: quantized model helpers used by some AWQ builds
+sentence-transformers      # bge-small-en-v1.5 for RAG store #1
+faiss-cpu                  # FAISS index for reference corpus
+Pillow

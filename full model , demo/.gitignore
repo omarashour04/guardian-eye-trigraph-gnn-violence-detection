@@ -1,0 +1,87 @@
+# Python
+
+**pycache**/
+**/**pycache**/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg-info/
+dist/
+**/dist/
+build/
+.eggs/
+
+# Virtual environments
+
+.venv/
+**/.venv/
+venv/
+env/
+
+# Frontend dependencies
+
+node_modules/
+**/node_modules/
+
+# Test caches
+
+.pytest_cache/
+**/.pytest_cache/
+
+# Jupyter
+
+.ipynb_checkpoints/
+
+# Environment variables
+
+.env
+**/.env
+*.env
+
+# Model weights & checkpoints
+
+models/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Large data artifacts
+
+*.npz
+
+# Generated results/media
+
+*.csv
+*.json
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.avi
+*.mpeg
+*.done
+
+# Kaggle credentials
+
+kaggle.json
+.kaggle/
+
+# OS files
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Modal
+
+.modal/
